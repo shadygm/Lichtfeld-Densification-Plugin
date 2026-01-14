@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[plugin]
+name = "densification"
+version = "1.0.0"
+description = "Dense point cloud initialization using RoMa v2 matching"
+author = "LichtFeld"
+min_lichtfeld_version = "1.0.0"
+
+[dependencies]
+packages = [
+    "pycolmap",
+    "romav2>=2.0.0",
+    "Pillow",
+    "numpy",
+    "scipy",
+    "tqdm",
+]
+
+[lifecycle]
+auto_start = true
+hot_reload = true
