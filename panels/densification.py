@@ -40,6 +40,7 @@ class DensifyConfig:
     sampson_thresh: float = 5.0
     min_parallax_deg: float = 0.5
     max_points: int = 0
+    no_filter: bool = False
     seed: int = 0
 
     def __post_init__(self):
@@ -164,6 +165,7 @@ class DensifyJob:
                 sampson_thresh=self.config.sampson_thresh,
                 min_parallax_deg=self.config.min_parallax_deg,
                 max_points=self.config.max_points,
+                no_filter=self.config.no_filter,
                 viz=False,
                 seed=self.config.seed,
             )
@@ -247,6 +249,7 @@ class DensificationPanel:
         self.sampson_thresh = 5.0
         self.min_parallax_deg = 0.5
         self.max_points = 0
+        self.no_filter = False
 
     def draw(self, layout):
         # Check for pending import (must happen on main thread)
@@ -270,7 +273,7 @@ class DensificationPanel:
         # Basic settings
         if layout.collapsing_header("Settings", default_open=True):
             layout.label("Images Subfolder:")
-            _, self.images_subdir = layout.text_input("##imgsubdir", self.images_subdir)
+            _, self.images_subdir = layout.path_input("##imgsubdir", self.images_subdir, True, "Select Image Folder")
 
             _, self.roma_setting_idx = layout.combo(
                 "Quality", self.roma_setting_idx, self.roma_settings
@@ -303,6 +306,7 @@ class DensificationPanel:
             _, self.max_points = layout.drag_int(
                 "Max Points (0=unlimited)", self.max_points, 1000, 0, 10000000
             )
+            _, self.no_filter = layout.checkbox("No Filtering (raw output, debug)", self.no_filter)
 
         layout.separator()
 
@@ -366,6 +370,7 @@ class DensificationPanel:
             sampson_thresh=self.sampson_thresh,
             min_parallax_deg=self.min_parallax_deg,
             max_points=self.max_points,
+            no_filter=self.no_filter,
         )
 
         self.job = DensifyJob(

@@ -35,7 +35,7 @@ Dependencies
 pip install pycolmap romav2 Pillow numpy scipy tqdm open3d  # (open3d optional for --viz)
 """
 
-import os, argparse, struct, time, threading
+import os, sys, argparse, struct, time, threading
 from queue import Queue
 from typing import Dict, Tuple, List, Optional
 from functools import lru_cache
@@ -43,25 +43,27 @@ import numpy as np
 from PIL import Image
 from tqdm import tqdm
 
+# Add local RoMaV2 to path
+import pathlib as _pathlib
+_THIS_DIR = _pathlib.Path(__file__).parent.resolve()
+_ROMAV2_SRC = _THIS_DIR / "RoMaV2" / "src"
+if str(_ROMAV2_SRC) not in sys.path:
+    sys.path.insert(0, str(_ROMAV2_SRC))
+
 # --------- IO / deps ----------
 import pycolmap
 from scipy.spatial.distance import cdist
 
-# Optional viz
-try:
-    import open3d as o3d
-    _HAS_O3D = True
-except Exception:
-    _HAS_O3D = False
-
 # RoMa v2 (romav2)
 _ROMA_OK = False
+_ROMA_ERROR = None
 try:
     import torch
     import torch.nn.functional as F
     from romav2 import RoMaV2
     _ROMA_OK = True
-except Exception:
+except Exception as e:
+    _ROMA_ERROR = str(e)
     _ROMA_OK = False
 
 
@@ -217,12 +219,15 @@ class RomaMatcher:
     - "turbo": H_lr=320, W_lr=320, H_hr=None, W_hr=None, bidirectional=False
     """
     def __init__(self, device="cuda", mode="outdoor", setting="fast"):
-        assert _ROMA_OK, "romav2 not available. Please `pip install romav2` and retry."
+        if not _ROMA_OK:
+            err_msg = f"romav2 not available: {_ROMA_ERROR}" if _ROMA_ERROR else "romav2 not available"
+            raise RuntimeError(err_msg)
         self.device = device
         # RoMaV2 doesn't have indoor/outdoor distinction - it's a unified model
         # mode is kept for API compatibility but ignored
         torch.set_float32_matmul_precision('highest')  # Required by RoMaV2
-        self.model = RoMaV2()
+        # Disable torch.compile to avoid functorch dependency issues
+        self.model = RoMaV2(RoMaV2.Cfg(compile=False))
         self.model.apply_setting(setting)
         self.model.eval()
         # For compatibility with original code expectations
@@ -249,9 +254,9 @@ class RomaMatcher:
         
         # Extract warp A->B and overlap/certainty
         # warp_AB is [B, H, W, 2] - coordinates in B for each pixel in A
-        # overlap_AB is [B, H, W] - overlap/certainty map
+        # overlap_AB is [B, H, W, 1] - overlap/certainty map (note trailing dim)
         warp_AB = preds["warp_AB"][0]  # [H, W, 2] - coords in B
-        overlap_AB = preds["overlap_AB"][0]  # [H, W]
+        overlap_AB = preds["overlap_AB"][0].squeeze(-1)  # [H, W] - squeeze the trailing dim
         
         H, W = overlap_AB.shape
         
@@ -334,10 +339,24 @@ def sampson_error(F: np.ndarray, uv1: np.ndarray, uv2: np.ndarray) -> np.ndarray
 # ==========================
 
 def select_samples_with_coverage(cert_map: torch.Tensor, M: int, cap: float = 0.9,
-                                 border: int = 2, tiles: int = 24) -> np.ndarray:
+                                 border: int = 2, tiles: int = 24, no_filter: bool = False) -> np.ndarray:
+    """Select sample indices from a certainty map.
+
+    If `no_filter` is True, return the top-`M` pixels by certainty (fast, raw),
+    otherwise use EDGS-style mixed sampling with coverage filling.
+    """
     cert = cert_map.clone().to("cpu")
     cert = torch.clamp(cert, max=cap)
     H, W = cert.shape
+    # Fast path: no_filter returns the top-M by certainty (no coverage constraints)
+    if no_filter:
+        flat = cert.reshape(-1).numpy()
+        if flat.size == 0:
+            return np.zeros((0,), dtype=np.int64)
+        order = np.argsort(-flat)
+        sel = order[:min(M, flat.size)]
+        return sel
+
     yy, xx = torch.meshgrid(torch.arange(H), torch.arange(W), indexing="ij")
     inside = (xx >= border) & (xx <= W - 1 - border) & (yy >= border) & (yy <= H - 1 - border)
     weights = (cert * inside.float()).reshape(-1)
@@ -346,7 +365,8 @@ def select_samples_with_coverage(cert_map: torch.Tensor, M: int, cap: float = 0.
         return np.zeros((0,), dtype=np.int64)
     weights = (weights / s).numpy()
 
-    m_main = int(M * 0.7)
+    # A slightly more permissive main-sampling fraction (more main samples)
+    m_main = int(M * 0.85)
     idx_main = np.random.choice(weights.size, size=min(m_main, weights.size), replace=False, p=weights)
 
     tile = max(1, W // tiles)
@@ -390,7 +410,7 @@ def write_points3D_bin(path_out: str, xyz: np.ndarray, rgb_uint8: np.ndarray, er
 
 def make_cpu_worker(job_q: Queue, res_q: Queue,
                     K_by, R_by, t_by, P_by, C_by, name_by, size_by,
-                    args, matcher_sample_cap: float):
+                    args, matcher_sample_cap: float, no_filter: bool = False):
     """
     job: dict with keys:
         ref_id, nn_ids (list[int]), warp_list (list[torch.Tensor CPU [H,W,4]]),
@@ -427,9 +447,10 @@ def make_cpu_worker(job_q: Queue, res_q: Queue,
                 agg = warp_stack[best_k, ys, xs]                                     # [H,W,4]
                 agg = agg.reshape(-1, 4).numpy()                                     # (H*W,4)
 
-                # --- EDGS sampling ---
+                # --- EDGS sampling (or raw top-certainty sampling if no_filter) ---
                 sel_idx = select_samples_with_coverage(best_cert, args.matches_per_ref,
-                                                       cap=matcher_sample_cap, border=2, tiles=24)
+                                                       cap=matcher_sample_cap, border=2, tiles=24,
+                                                       no_filter=no_filter)
                 if sel_idx.size == 0:
                     res_q.put((None, None, None))
                     job_q.task_done()
@@ -486,8 +507,8 @@ def make_cpu_worker(job_q: Queue, res_q: Queue,
                     yB = (yB_norm[idxs] + 1.0)*0.5*(h_match-1)
                     uvB = np.stack([xB * sxB, yB * syB], axis=1)
 
-                    # Optional Sampson pre-triangulation
-                    if args.sampson_thresh > 0:
+                    # Optional Sampson pre-triangulation (skipped in no_filter)
+                    if (not no_filter) and args.sampson_thresh > 0:
                         F = fundamental_from_world2cam(K_by[ref_id], R_by[ref_id], t_by[ref_id],
                                                        K_by[nbr_id], R_by[nbr_id], t_by[nbr_id])
                         se = sampson_error(F, uvA_full[idxs], uvB)
@@ -507,15 +528,23 @@ def make_cpu_worker(job_q: Queue, res_q: Queue,
                     err1 = reprojection_errors(P1, Xi, uvA)
                     err2 = reprojection_errors(P2, Xi, uvB)
                     err  = np.maximum(err1, err2)
-                    keep = (err <= float(args.reproj_thresh))
 
-                    keep &= cheirality_mask(P1, Xi)
-                    keep &= cheirality_mask(P2, Xi)
-                    if args.min_parallax_deg > 0:
-                        keep &= parallax_mask(C_by[ref_id], C_by[nbr_id], Xi, min_deg=args.min_parallax_deg)
+                    # If no_filter is enabled, accept all triangulated points (except NaNs/infs)
+                    if no_filter:
+                        # sanity: remove NaN/inf and extremely large reprojection errors
+                        finite_mask = np.isfinite(Xi).all(axis=1) & np.isfinite(err)
+                        if not np.any(finite_mask):
+                            continue
+                        keep = finite_mask
+                    else:
+                        keep = (err <= float(args.reproj_thresh))
+                        keep &= cheirality_mask(P1, Xi)
+                        keep &= cheirality_mask(P2, Xi)
+                        if args.min_parallax_deg > 0:
+                            keep &= parallax_mask(C_by[ref_id], C_by[nbr_id], Xi, min_deg=args.min_parallax_deg)
 
-                    if not np.any(keep):
-                        continue
+                        if not np.any(keep):
+                            continue
 
                     Xw = Xi[keep][:,:3].astype(np.float64)
                     col = rgb_ref[idxs][keep].astype(np.float32)
@@ -546,7 +575,8 @@ def make_cpu_worker(job_q: Queue, res_q: Queue,
 def dense_init(args):
     np.random.seed(args.seed)
     if not _ROMA_OK:
-        raise RuntimeError("romav2 not available. Please `pip install romav2` and retry.")
+        err_msg = f"romav2 not available: {_ROMA_ERROR}" if _ROMA_ERROR else "romav2 not available"
+        raise RuntimeError(err_msg)
 
     scene_root = os.path.abspath(args.scene_root)
     sparse_dir = os.path.join(scene_root, "sparse", "0")
@@ -608,7 +638,7 @@ def dense_init(args):
     res_q: Queue = Queue()
     worker_fn = make_cpu_worker(job_q, res_q,
                                 K_by, R_by, t_by, P_by, C_by, name_by, size_by,
-                                args, matcher.sample_thresh)
+                                args, matcher.sample_thresh, no_filter=args.no_filter)
     worker_thread = threading.Thread(target=worker_fn, daemon=True)
     worker_thread.start()
 
@@ -695,16 +725,23 @@ def dense_init(args):
         log(f"Capped to {xyz.shape[0]} points (--max_points).")
 
     # Write COLMAP points3D.bin
-    out_path = os.path.join(sparse_dir, args.out_name)
-    write_points3D_bin(out_path, xyz, to_uint8_rgb(rgb), errors=err)
-    log(f"Wrote dense COLMAP: {out_path}")
+    import shutil
 
-    # Visualization
-    if args.viz and _HAS_O3D:
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(xyz.astype(np.float64))
-        pcd.colors = o3d.utility.Vector3dVector((rgb.astype(np.float32)))
-        o3d.visualization.draw_geometries([pcd], window_name="Dense init (EDGS-like, pipelined)")
+    canonical_path = os.path.join(sparse_dir, "points3D.bin")
+    backup_path    = os.path.join(sparse_dir, "points3D.original.save")
+    dense_tmp_path = os.path.join(sparse_dir, "points3D_dense.tmp.bin")
+
+    # 1. Write dense cloud to a temporary file first (safe write)
+    write_points3D_bin(dense_tmp_path, xyz, to_uint8_rgb(rgb), errors=err)
+
+    # 2. Backup original sparse cloud ONCE
+    if os.path.exists(canonical_path) and not os.path.exists(backup_path):
+        shutil.copy2(canonical_path, backup_path)
+        log(f"Backed up original sparse cloud -> {backup_path}")
+
+    # 3. Atomically replace canonical points3D.bin
+    os.replace(dense_tmp_path, canonical_path)
+    log(f"Installed dense cloud as canonical -> {canonical_path}")
 
     return 0
 
@@ -727,14 +764,14 @@ def build_argparser():
 
     # Sampling / gating
     ap.add_argument("--matches_per_ref", type=int, default=12000, help="Samples per ref after aggregation")
-    ap.add_argument("--certainty_thresh", type=float, default=0.20, help="Min certainty floor before selection")
-    ap.add_argument("--reproj_thresh", type=float, default=1.5, help="Max reprojection error (px)")
-    ap.add_argument("--sampson_thresh", type=float, default=5.0, help="Max Sampson error (px^2) pre-triangulation (<=0 to disable)")
-    ap.add_argument("--min_parallax_deg", type=float, default=0.5, help="Min parallax (deg); set 0 to disable")
+    ap.add_argument("--certainty_thresh", type=float, default=0.05, help="Min certainty floor before selection (more permissive)")
+    ap.add_argument("--reproj_thresh", type=float, default=4.0, help="Max reprojection error (px) — relaxed by default")
+    ap.add_argument("--sampson_thresh", type=float, default=50.0, help="Max Sampson error (px^2) pre-triangulation (<=0 to disable) — relaxed by default")
+    ap.add_argument("--min_parallax_deg", type=float, default=0.1, help="Min parallax (deg); set 0 to disable (relaxed)")
+    ap.add_argument("--no_filter", action="store_true", help="Disable all geometric filtering (reprojection/sampson/cheirality/parallax). Useful for debugging/raw output.")
 
     # Output shaping
     ap.add_argument("--max_points", type=int, default=0, help="Optional cap on total points (0 = unlimited)")
-    ap.add_argument("--viz", action="store_true", help="Visualize output point cloud (Open3D)")
     ap.add_argument("--seed", type=int, default=0, help="Random seed")
     return ap
 

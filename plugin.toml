@@ -10,12 +10,16 @@ min_lichtfeld_version = "1.0.0"
 
 [dependencies]
 packages = [
+    "numpy==2.4.1",
     "pycolmap",
-    "romav2>=2.0.0",
     "Pillow",
-    "numpy",
     "scipy",
     "tqdm",
+    "torch>=2.2",
+    "torchvision>=0.23.0"
+]
+local_packages = [
+    "RoMaV2"
 ]
 
 [lifecycle]
