@@ -30,7 +30,7 @@ git clone https://github.com/shadygm/lichtfeld-densification-plugin.git ~/.licht
 ### GUI
 
 1. Open the **Dense Initialization** panel (side panel).
-2. Select your scene folder (containing `sparse/0/`).
+2. Select your scene folder.
 3. Configure settings (e.g., RoMa quality, reference fraction, filtering thresholds).
 4. Click **Start Densification**.
 5. Monitor progress and click **Import to Scene** when complete.
