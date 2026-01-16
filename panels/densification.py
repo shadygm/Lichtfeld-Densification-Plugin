@@ -170,7 +170,7 @@ class DensifyJob:
                 seed=self.config.seed,
             )
 
-            self._update(DensifyStage.MATCHING, 10.0, "Running RoMa v2 matching...")
+            self._update(DensifyStage.MATCHING, 10.0, "Initializing the System...")
             if check_cancelled():
                 self._update(DensifyStage.CANCELLED, 10.0, "Cancelled")
                 return
@@ -178,9 +178,26 @@ class DensifyJob:
             # Import and run the densify pipeline
             from ..densify import dense_init
 
+            def progress_cb(pct: float, msg: str):
+                if check_cancelled():
+                    # raising exception to abort dense_init might be abrupt, 
+                    # but dense_init doesn't have a cancel check. 
+                    # For now we just update status and let it finish or wait 
+                    # for the next check points in dense_init if we added them.
+                    # Since we didn't add cancellation hooks in dense_init loops,
+                    # we just update the UI to show cancellation is pending or ignored.
+                    return
+                
+                stage = DensifyStage.MATCHING
+                if pct >= 90.0:
+                    stage = DensifyStage.WRITING
+                elif "triangula" in msg.lower():
+                    stage = DensifyStage.TRIANGULATING
+                
+                self._update(stage, pct, msg)
+
             # Run the dense initialization
-            # Note: dense_init handles its own progress internally via tqdm
-            result_code = dense_init(args)
+            result_code = dense_init(args, progress_callback=progress_cb)
 
             if result_code != 0:
                 raise RuntimeError(f"Densification failed with code {result_code}")

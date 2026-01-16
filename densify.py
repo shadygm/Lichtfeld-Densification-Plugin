@@ -37,7 +37,7 @@ pip install pycolmap romav2 Pillow numpy scipy tqdm open3d  # (open3d optional f
 
 import os, sys, argparse, struct, time, threading
 from queue import Queue
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, List, Optional, Callable
 from functools import lru_cache
 import numpy as np
 from PIL import Image
@@ -572,7 +572,7 @@ def make_cpu_worker(job_q: Queue, res_q: Queue,
 # Main pipeline (producer)
 # ==========================
 
-def dense_init(args):
+def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] = None):
     np.random.seed(args.seed)
     if not _ROMA_OK:
         err_msg = f"romav2 not available: {_ROMA_ERROR}" if _ROMA_ERROR else "romav2 not available"
@@ -628,74 +628,100 @@ def dense_init(args):
 
     nn_table = nearest_neighbors(flat_poses, max(1, args.nns_per_ref))  # local indices
 
-    # RoMa v2 matcher (GPU if available)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    matcher = RomaMatcher(device=device, mode=args.roma_model, setting=args.roma_setting)
-    log(f"RoMaV2: setting={args.roma_setting} on {device}")
+    matcher = None
+    worker_thread = None
+    job_q = Queue(maxsize=2)   # small buffer to bound memory
+    res_q = Queue()
 
-    # Queues & worker
-    job_q: Queue = Queue(maxsize=2)   # small buffer to bound memory
-    res_q: Queue = Queue()
-    worker_fn = make_cpu_worker(job_q, res_q,
-                                K_by, R_by, t_by, P_by, C_by, name_by, size_by,
-                                args, matcher.sample_thresh, no_filter=args.no_filter)
-    worker_thread = threading.Thread(target=worker_fn, daemon=True)
-    worker_thread.start()
+    try:
+        # RoMa v2 matcher (GPU if available)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        matcher = RomaMatcher(device=device, mode=args.roma_model, setting=args.roma_setting)
+        log(f"RoMaV2: setting={args.roma_setting} on {device}")
 
-    # Producer loop (GPU stage) — enqueue one job per reference
-    jobs_enqueued = 0
-    t0 = time.time()
+        # Queues & worker
+        worker_fn = make_cpu_worker(job_q, res_q,
+                                    K_by, R_by, t_by, P_by, C_by, name_by, size_by,
+                                    args, matcher.sample_thresh, no_filter=args.no_filter)
+        worker_thread = threading.Thread(target=worker_fn, daemon=True)
+        worker_thread.start()
 
-    # Only iterate selected refs (not all frames)
-    for ref_local in tqdm(refs_local, desc="GPU matching / enqueue"):
-        ref_id = img_ids[ref_local]
-        ref_name = name_by[ref_id]
-        ref_path = find_image(images_dir, ref_name)
-        w_match, h_match = matcher.w_resized, matcher.h_resized
-        imA = load_rgb_resized(ref_path, (w_match, h_match))
-        imA_np = np.asarray(imA, dtype=np.uint8)          # for CPU bilinear/color
-        wA_cam, hA_cam = size_by[ref_id]
-        local_nns = nn_table[ref_local][:args.nns_per_ref]
-        if len(local_nns) == 0:
-            continue
+        # Producer loop (GPU stage) — enqueue one job per reference
+        jobs_enqueued = 0
+        t0 = time.time()
+        
+        total_refs = len(refs_local)
 
-        warp_list_cpu: List[torch.Tensor] = []
-        cert_list_cpu: List[torch.Tensor] = []
-        nn_ids: List[int] = []
+        # Only iterate selected refs (not all frames)
+        for i, ref_local in enumerate(tqdm(refs_local, desc="GPU matching / enqueue")):
+            # Report progress (10% to 90%)
+            if progress_callback:
+                # Weighted progress: matching is the heavy part
+                pct = 10.0 + (float(i) / max(1, total_refs)) * 80.0
+                progress_callback(pct, f"Matching view {i+1}/{total_refs}")
 
-        # Run RoMa against neighbors (GPU). Convert outputs to CPU tensors and store.
-        for nn_local in local_nns:
-            nbr_id = img_ids[nn_local]
-            if nbr_id == ref_id:
+            ref_id = img_ids[ref_local]
+            ref_name = name_by[ref_id]
+            ref_path = find_image(images_dir, ref_name)
+            w_match, h_match = matcher.w_resized, matcher.h_resized
+            imA = load_rgb_resized(ref_path, (w_match, h_match))
+            imA_np = np.asarray(imA, dtype=np.uint8)          # for CPU bilinear/color
+            wA_cam, hA_cam = size_by[ref_id]
+            local_nns = nn_table[ref_local][:args.nns_per_ref]
+            if len(local_nns) == 0:
                 continue
-            imB = load_rgb_resized(find_image(images_dir, name_by[nbr_id]), (w_match, h_match))
-            warp_hw, cert_hw = matcher.match_grids(imA, imB)  # GPU tensors
-            cert_hw = torch.clamp(cert_hw, min=args.certainty_thresh)  # mild floor (on GPU)
-            # Move to CPU for the worker and free GPU ASAP
-            warp_list_cpu.append(warp_hw.detach().to("cpu"))
-            cert_list_cpu.append(cert_hw.detach().to("cpu"))
-            nn_ids.append(nbr_id)
 
-        if not cert_list_cpu:
-            continue
+            warp_list_cpu: List[torch.Tensor] = []
+            cert_list_cpu: List[torch.Tensor] = []
+            nn_ids: List[int] = []
 
-        # Enqueue one job per reference (CPU will aggregate+filter+triangulate)
-        job = dict(
-            ref_id=ref_id,
-            nn_ids=nn_ids,
-            warp_list=warp_list_cpu,
-            cert_list=cert_list_cpu,
-            imA_np=imA_np,
-            w_match=w_match, h_match=h_match,
-            wA_cam=wA_cam, hA_cam=hA_cam,
-        )
-        job_q.put(job)
-        jobs_enqueued += 1
+            # Run RoMa against neighbors (GPU). Convert outputs to CPU tensors and store.
+            for nn_local in local_nns:
+                nbr_id = img_ids[nn_local]
+                if nbr_id == ref_id:
+                    continue
+                imB = load_rgb_resized(find_image(images_dir, name_by[nbr_id]), (w_match, h_match))
+                warp_hw, cert_hw = matcher.match_grids(imA, imB)  # GPU tensors
+                cert_hw = torch.clamp(cert_hw, min=args.certainty_thresh)  # mild floor (on GPU)
+                # Move to CPU for the worker and free GPU ASAP
+                warp_list_cpu.append(warp_hw.detach().to("cpu"))
+                cert_list_cpu.append(cert_hw.detach().to("cpu"))
+                nn_ids.append(nbr_id)
+
+            if not cert_list_cpu:
+                continue
+
+            # Enqueue one job per reference (CPU will aggregate+filter+triangulate)
+            job = dict(
+                ref_id=ref_id,
+                nn_ids=nn_ids,
+                warp_list=warp_list_cpu,
+                cert_list=cert_list_cpu,
+                imA_np=imA_np,
+                w_match=w_match, h_match=h_match,
+                wA_cam=wA_cam, hA_cam=hA_cam,
+            )
+            job_q.put(job)
+            jobs_enqueued += 1
+
+    finally:
+        # Cleanup RoMa model immediately after GPU loop
+        if matcher is not None:
+            del matcher
+            matcher = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+        log("RoMaV2 model unloaded and GPU memory cleared.")
 
     # Signal worker to finish and wait
+    if progress_callback:
+        progress_callback(90.0, "Finalizing triangulation...")
+    
     job_q.put(None)
     job_q.join()
-    worker_thread.join(timeout=1.0)
+    if worker_thread:
+        worker_thread.join(timeout=1.0)
 
     # Collect results
     all_xyz, all_rgb, all_err = [], [], []
@@ -723,6 +749,9 @@ def dense_init(args):
         sel = np.random.default_rng(args.seed).choice(xyz.shape[0], size=args.max_points, replace=False)
         xyz, rgb, err = xyz[sel], rgb[sel], err[sel]
         log(f"Capped to {xyz.shape[0]} points (--max_points).")
+
+    if progress_callback:
+        progress_callback(95.0, "Writing output...")
 
     # Write COLMAP points3D.bin
     import shutil
