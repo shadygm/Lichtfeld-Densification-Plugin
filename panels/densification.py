@@ -29,7 +29,7 @@ class DensifyConfig:
     """Configuration for dense initialization pipeline."""
 
     scene_path: Path
-    images_subdir: str = "images_2"
+    images_subdir: str = "images"
     out_name: str = "points3D_dense.bin"
     roma_setting: str = "fast"
     num_refs: float = 0.75
@@ -323,7 +323,7 @@ class DensificationPanel:
             _, self.max_points = layout.drag_int(
                 "Max Points (0=unlimited)", self.max_points, 1000, 0, 10000000
             )
-            _, self.no_filter = layout.checkbox("No Filtering (raw output, debug)", self.no_filter)
+            _, self.no_filter = layout.checkbox("No Filtering", self.no_filter)
 
         layout.separator()
 
