@@ -16,7 +16,8 @@ packages = [
     "scipy",
     "tqdm",
     "torch>=2.2",
-    "torchvision>=0.23.0"
+    "torchvision>=0.23.0",
+    "einops>=0.8.1"
 ]
 local_packages = [
     "RoMaV2"
