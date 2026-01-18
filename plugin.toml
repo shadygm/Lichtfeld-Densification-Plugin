@@ -17,7 +17,8 @@ packages = [
     "tqdm",
     "torch>=2.2",
     "torchvision>=0.23.0",
-    "einops>=0.8.1"
+    "einops>=0.8.1",
+    "rich>=14.2.0" 
 ]
 local_packages = [
     "RoMaV2"
