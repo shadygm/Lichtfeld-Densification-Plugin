@@ -8,11 +8,10 @@ Based on bounty #2 ([link](https://github.com/MrNeRF/LichtFeld-Studio/pull/413))
 
 - **RoMaV2 Matching**: Upgraded dense correspondence matching for better accuracy.
 - **GUI Panel**: Easy-to-use interface with progress tracking and scene import.
-- **CLI Support**: Run via `densify.py` with full argument control.
 
 ## Installation
 
-### From GitHub (LichtFeld Studio 1.x+)
+### From GitHub (LichtFeld Studio v0.5+)
 
 In LichtFeld Studio:
 1. Open the **Plugins** panel.
@@ -30,40 +29,11 @@ git clone https://github.com/shadygm/lichtfeld-densification-plugin.git ~/.licht
 ### GUI
 
 1. Open the **Dense Initialization** panel (side panel).
-2. Select your scene folder.
+2. Ensure a scene is loaded in LichtFeld Studio.
 3. Configure settings (e.g., RoMa quality, reference fraction, filtering thresholds).
 4. Click **Start Densification**.
 5. Monitor progress and click **Import to Scene** when complete.
 
-### Python API
-
-```python
-from densify import dense_init
-from argparse import Namespace
-
-# Synchronous run
-args = Namespace(
-    scene_root="/path/to/scene",
-    images_subdir="images_2",
-    roma_setting="fast",
-    num_refs=0.75,
-    nns_per_ref=4,
-    matches_per_ref=12000,
-    certainty_thresh=0.05,
-    reproj_thresh=4.0,
-    sampson_thresh=50.0,
-    min_parallax_deg=0.1,
-    no_filter=False,
-    max_points=0,
-    seed=0
-)
-
-result_code = dense_init(args)
-if result_code == 0:
-    print("Densification successful!")
-```
-
-For asynchronous usage, use the panel's job system or extend with threading.
 
 ## Configuration
 
