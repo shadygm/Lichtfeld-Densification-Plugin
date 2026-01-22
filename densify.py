@@ -26,6 +26,7 @@ the previously enqueued reference r, keeping both devices utilized.
 RoMa v2 Settings
 ----------------
 - "precise": H_lr=800, W_lr=800, H_hr=1280, W_hr=1280, bidirectional=True (highest quality)
+- "high": H_lr=640, W_lr=640, H_hr=960, W_hr=960, bidirectional=True (high quality, less VRAM)
 - "base": H_lr=640, W_lr=640, no high-res refinement, bidirectional=False
 - "fast": H_lr=512, W_lr=512, no high-res refinement, bidirectional=False (default)
 - "turbo": H_lr=320, W_lr=320, no high-res refinement, bidirectional=False (fastest)
@@ -214,6 +215,7 @@ class RomaMatcher:
     
     Settings available via model.apply_setting(setting):
     - "precise": H_lr=800, W_lr=800, H_hr=1280, W_hr=1280, bidirectional=True
+    - "high": H_lr=640, W_lr=640, H_hr=960, W_hr=960, bidirectional=True (custom setting)
     - "base": H_lr=640, W_lr=640, H_hr=None, W_hr=None, bidirectional=False
     - "fast": H_lr=512, W_lr=512, H_hr=None, W_hr=None, bidirectional=False
     - "turbo": H_lr=320, W_lr=320, H_hr=None, W_hr=None, bidirectional=False
@@ -228,7 +230,19 @@ class RomaMatcher:
         torch.set_float32_matmul_precision('highest')  # Required by RoMaV2
         # Disable torch.compile to avoid functorch dependency issues
         self.model = RoMaV2(RoMaV2.Cfg(compile=False))
-        self.model.apply_setting(setting)
+        
+        # Apply setting - "high" is a custom setting not in RoMaV2's built-in options
+        if setting == "high":
+            # Custom high-quality setting: between "precise" and "base"
+            # Uses bidirectional matching with moderate resolution
+            self.model.H_lr = 640
+            self.model.W_lr = 640
+            self.model.H_hr = 960
+            self.model.W_hr = 960
+            self.model.bidirectional = True
+        else:
+            self.model.apply_setting(setting)
+        
         self.model.eval()
         # For compatibility with original code expectations
         self.sample_thresh = 0.9  # cap for certainty in sampling
