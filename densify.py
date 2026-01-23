@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Dense, accurate COLMAP pointcloud initializer (EDGS-inspired, RoMa v2-driven)
-with pipelined GPU (matching) ↔ CPU (filtering/triangulation) overlap.
+with pipelined GPU (matching) <> CPU (filtering/triangulation) overlap.
 
 Pipeline
 --------
@@ -216,7 +216,7 @@ class RomaMatcher:
     Settings available via model.apply_setting(setting):
     - "precise": H_lr=800, W_lr=800, H_hr=1280, W_hr=1280, bidirectional=True
     - "base": H_lr=640, W_lr=640, H_hr=None, W_hr=None, bidirectional=False
-    - "fast": H_lr=512, W_lr=512, H_hr=None, W_hr=None, bidirectional=False
+    - "fast": H_lr=512, W_lr=512, H_hr=None, W_lr=None, bidirectional=False
     - "turbo": H_lr=320, W_lr=320, H_hr=None, W_hr=None, bidirectional=False
     """
     def __init__(self, device="cuda", mode="outdoor", setting="fast"):
@@ -673,7 +673,7 @@ def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] =
 
     matcher = None
     worker_thread = None
-    job_q = Queue(maxsize=2)   # small buffer to bound memory
+    job_q = Queue(maxsize=8)   # small buffer to bound memory
     res_q = Queue()
 
     try:
