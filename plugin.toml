@@ -15,11 +15,16 @@ packages = [
     "Pillow",
     "scipy",
     "tqdm",
-    "torch>=2.2",
-    "torchvision>=0.23.0",
+    "torch>=2.6.0",
+    "torchvision>=0.21.0",
     "einops>=0.8.1",
     "rich>=14.2.0" 
 ]
+
+# PyTorch index URL for CUDA 12.6+ (required for RTX 5080 Blackwell)
+[[dependencies.pip]]
+index-url = "https://download.pytorch.org/whl/cu126"
+
 local_packages = [
     "RoMaV2"
 ]
