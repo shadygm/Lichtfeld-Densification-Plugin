@@ -254,8 +254,8 @@ class DensificationPanel:
 
         # Settings
         self.images_subdir = "images"
-        self.roma_setting_idx = 2  # "fast" is default
-        self.roma_settings = ["precise", "base", "fast", "turbo"]
+        self.roma_setting_idx = 3  # "fast" is default
+        self.roma_settings = ["precise", "high", "base", "fast", "turbo"]
 
         # Advanced settings
         self.num_refs = 0.75
@@ -295,7 +295,7 @@ class DensificationPanel:
             _, self.roma_setting_idx = layout.combo(
                 "Quality", self.roma_setting_idx, self.roma_settings
             )
-            layout.label("(precise=slow+accurate, turbo=fast+rough)")
+            layout.label("(precise > high > base > fast > turbo)")
 
         # Advanced settings
         if layout.collapsing_header("Advanced Settings", default_open=False):
