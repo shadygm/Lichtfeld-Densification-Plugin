@@ -772,10 +772,9 @@ def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] =
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             
-            # Free GPU memory of the batch results immediately
+            # Free GPU memory of the batch results immediately by dropping references;
+            # rely on PyTorch's caching allocator instead of empty_cache() in the hot loop.
             del batch_results
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
 
             if not cert_list_cpu:
                 continue
