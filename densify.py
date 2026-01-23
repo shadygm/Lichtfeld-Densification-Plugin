@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Dense, accurate COLMAP pointcloud initializer (EDGS-inspired, RoMa v2-driven)
-with pipelined GPU (matching) ↔ CPU (filtering/triangulation) overlap.
+with pipelined GPU (matching) <> CPU (filtering/triangulation) overlap.
 
 Pipeline
 --------
@@ -40,6 +40,7 @@ import os, sys, argparse, struct, time, threading
 from queue import Queue
 from typing import Dict, Tuple, List, Optional, Callable
 from functools import lru_cache
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
@@ -217,14 +218,14 @@ class RomaMatcher:
     - "precise": H_lr=800, W_lr=800, H_hr=1280, W_hr=1280, bidirectional=True
     - "high": H_lr=640, W_lr=640, H_hr=960, W_hr=960, bidirectional=True (custom setting)
     - "base": H_lr=640, W_lr=640, H_hr=None, W_hr=None, bidirectional=False
-    - "fast": H_lr=512, W_lr=512, H_hr=None, W_hr=None, bidirectional=False
+    - "fast": H_lr=512, W_lr=512, H_hr=None, W_lr=None, bidirectional=False
     - "turbo": H_lr=320, W_lr=320, H_hr=None, W_hr=None, bidirectional=False
     """
     def __init__(self, device="cuda", mode="outdoor", setting="fast"):
         if not _ROMA_OK:
             err_msg = f"romav2 not available: {_ROMA_ERROR}" if _ROMA_ERROR else "romav2 not available"
             raise RuntimeError(err_msg)
-        self.device = device
+        self.device = torch.device(device)
         # RoMaV2 doesn't have indoor/outdoor distinction - it's a unified model
         # mode is kept for API compatibility but ignored
         torch.set_float32_matmul_precision('highest')  # Required by RoMaV2
@@ -249,7 +250,20 @@ class RomaMatcher:
         # Store resolution for reference
         self.w_resized = self.model.W_lr
         self.h_resized = self.model.H_lr
-        log(f"RoMaV2 initialized with setting='{setting}' (H_lr={self.model.H_lr}, W_lr={self.model.W_lr})")
+        log(f"RoMaV2 initialized with setting='{setting}' (H_lr={self.model.H_lr}, W_lr={self.model.W_lr}) on {device}")
+
+    def _preprocess_image_batch(self, images: List[Image.Image]) -> torch.Tensor:
+        """Convert PIL images to normalized tensor batch on GPU.
+        
+        Args:
+            images: List of PIL Images
+            
+        Returns:
+            Tensor [B, 3, H, W] normalized to [0, 1] on GPU
+        """
+        import torchvision.transforms.functional as TF
+        tensors = [TF.to_tensor(img).to(self.device) for img in images]
+        return torch.stack(tensors, dim=0)
 
     @torch.inference_mode()
     def match_grids(self, imA: Image.Image, imB: Image.Image):
@@ -263,6 +277,8 @@ class RomaMatcher:
             warp: [H, W, 4] tensor with (xA, yA, xB, yB) in [-1, 1] normalized coords
             cert: [H, W] tensor with overlap/certainty values in [0, 1]
         """
+        # Ensure matmul precision is set (RoMa v2 requirement)
+        torch.set_float32_matmul_precision('highest')
         # RoMaV2.match() accepts ImageLike (paths, PIL Images, tensors, numpy arrays)
         preds = self.model.match(imA, imB)
         
@@ -284,6 +300,32 @@ class RomaMatcher:
         warp = torch.cat([gridA, warp_AB], dim=-1)  # [H, W, 4]
         
         return warp.contiguous(), overlap_AB.contiguous()  # [H,W,4], [H,W]
+
+    @torch.inference_mode()
+    def match_grids_batch(self, imA: Image.Image, imB_list: List[Image.Image]):
+        """Batch match reference image against multiple neighbor images.
+        
+        Args:
+            imA: Reference image (PIL Image)
+            imB_list: List of neighbor images (PIL Images)
+            
+        Returns:
+            List of (warp, cert) tuples for each neighbor
+        """
+        if not imB_list:
+            return []
+        
+        results = []
+        # Process in smaller batches to avoid OOM
+        batch_size = 4 if self.device.type == "cuda" else 2
+        
+        for i in range(0, len(imB_list), batch_size):
+            batch = imB_list[i:i+batch_size]
+            for imB in batch:
+                warp, cert = self.match_grids(imA, imB)
+                results.append((warp, cert))
+        
+        return results
 
 
 # ==========================
@@ -644,7 +686,7 @@ def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] =
 
     matcher = None
     worker_thread = None
-    job_q = Queue(maxsize=2)   # small buffer to bound memory
+    job_q = Queue(maxsize=8)   # small buffer to bound memory
     res_q = Queue()
 
     try:
@@ -652,6 +694,15 @@ def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] =
         device = "cuda" if torch.cuda.is_available() else "cpu"
         matcher = RomaMatcher(device=device, mode=args.roma_model, setting=args.roma_setting)
         log(f"RoMaV2: setting={args.roma_setting} on {device}")
+        
+        # Enable CUDA optimizations
+        if torch.cuda.is_available():
+            # Use TF32 for better performance on Ampere+ GPUs
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            # Enable cuDNN autotuner for optimal convolution algorithms
+            torch.backends.cudnn.benchmark = True
+            log("Enabled CUDA optimizations: TF32, cuDNN benchmark")
 
         # Queues & worker
         worker_fn = make_cpu_worker(job_q, res_q,
@@ -689,18 +740,50 @@ def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] =
             cert_list_cpu: List[torch.Tensor] = []
             nn_ids: List[int] = []
 
-            # Run RoMa against neighbors (GPU). Convert outputs to CPU tensors and store.
-            for nn_local in local_nns:
+            # Parallel image loading to prevent I/O bottleneck
+            def load_neighbor(nn_local):
                 nbr_id = img_ids[nn_local]
                 if nbr_id == ref_id:
-                    continue
-                imB = load_rgb_resized(find_image(images_dir, name_by[nbr_id]), (w_match, h_match))
-                warp_hw, cert_hw = matcher.match_grids(imA, imB)  # GPU tensors
+                    return None, None, None
+                try:
+                    img_path = find_image(images_dir, name_by[nbr_id])
+                    imB = load_rgb_resized(img_path, (w_match, h_match))
+                    return imB, nn_local, nbr_id
+                except Exception as e:
+                    log(f"Warning: failed to load neighbor {name_by.get(nbr_id, 'unknown')}: {e}")
+                    return None, None, None
+            
+            nn_images = []
+            valid_nn_locals = []
+            
+            # Use thread pool for parallel I/O (4 threads is good for disk/network I/O)
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                load_results = list(executor.map(load_neighbor, local_nns))
+            
+            for imB, nn_local, nbr_id in load_results:
+                if imB is not None:
+                    nn_images.append(imB)
+                    valid_nn_locals.append(nn_local)
+                    nn_ids.append(nbr_id)
+
+            if not nn_images:
+                continue
+
+            # Batch process all neighbors on GPU for better utilization
+            batch_results = matcher.match_grids_batch(imA, nn_images)
+            
+            for warp_hw, cert_hw in batch_results:
                 cert_hw = torch.clamp(cert_hw, min=args.certainty_thresh)  # mild floor (on GPU)
                 # Move to CPU for the worker and free GPU ASAP
-                warp_list_cpu.append(warp_hw.detach().to("cpu"))
-                cert_list_cpu.append(cert_hw.detach().to("cpu"))
-                nn_ids.append(nbr_id)
+                # Use pinned memory for faster transfers
+                warp_cpu = warp_hw.detach().to("cpu", non_blocking=True).pin_memory()
+                cert_cpu = cert_hw.detach().to("cpu", non_blocking=True).pin_memory()
+                warp_list_cpu.append(warp_cpu)
+                cert_list_cpu.append(cert_cpu)
+            
+            
+            # Free GPU memory of the batch results immediately
+            del batch_results
 
             if not cert_list_cpu:
                 continue

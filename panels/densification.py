@@ -203,7 +203,7 @@ class DensifyJob:
                 raise RuntimeError(f"Densification failed with code {result_code}")
 
             elapsed = time.time() - t0
-            output_path = self.config.scene_path / "sparse" / "0" / self.config.out_name
+            output_path = self.config.scene_path / "sparse" / "0" / "points3D.bin"
 
             # Try to count points from the output file
             num_points = 0
@@ -253,7 +253,7 @@ class DensificationPanel:
         self._pending_import = None
 
         # Settings
-        self.images_subdir = "images_2"
+        self.images_subdir = "images"
         self.roma_setting_idx = 3  # "fast" is default
         self.roma_settings = ["precise", "high", "base", "fast", "turbo"]
 
