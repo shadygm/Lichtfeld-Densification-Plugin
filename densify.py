@@ -761,8 +761,8 @@ def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] =
             
             for warp_hw, cert_hw in batch_results:
                 cert_hw = torch.clamp(cert_hw, min=args.certainty_thresh)  # mild floor (on GPU)
-                # Move to CPU for the worker and free GPU ASAP
-                # Use pinned memory for faster transfers
+                # Asynchronously move to CPU for the worker and free GPU ASAP
+                # (non_blocking=True allows overlap when conditions for async transfers are met)
                 warp_cpu = warp_hw.detach().to("cpu", non_blocking=True)
                 cert_cpu = cert_hw.detach().to("cpu", non_blocking=True)
                 warp_list_cpu.append(warp_cpu)
