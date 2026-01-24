@@ -244,6 +244,7 @@ class RomaMatcher:
         else:
             self.model.apply_setting(setting)
         
+        self.model.to(self.device)
         self.model.eval()
         # For compatibility with original code expectations
         self.sample_thresh = 0.9  # cap for certainty in sampling
