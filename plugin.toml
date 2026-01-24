@@ -8,26 +8,49 @@ description = "Dense point cloud initialization using RoMa v2 matching"
 author = "LichtFeld"
 min_lichtfeld_version = "1.0.0"
 
+# -----------------------------------------------------------------------------
+# Dependencies
+# -----------------------------------------------------------------------------
 [dependencies]
 packages = [
+    "torch>=2.6.0",
+    "torchvision>=0.23.0",
     "numpy==2.4.1",
     "pycolmap",
     "Pillow",
     "scipy",
     "tqdm",
-    "torch>=2.6.0",
-    "torchvision>=0.23.0",
     "einops>=0.8.1",
-    "rich>=14.2.0" 
+    "rich>=14.2.0"
 ]
 
-[[dependencies.pip]]
-index-url = "https://download.pytorch.org/whl/cu128"
+# -----------------------------------------------------------------------------
+# uv index configuration
+# -----------------------------------------------------------------------------
 
+# PyTorch CUDA 12.8 index
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+# -----------------------------------------------------------------------------
+# Per-package index pinning
+# -----------------------------------------------------------------------------
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+# -----------------------------------------------------------------------------
+# Local packages bundled with the plugin
+# -----------------------------------------------------------------------------
 local_packages = [
     "RoMaV2"
 ]
 
+# -----------------------------------------------------------------------------
+# Plugin lifecycle
+# -----------------------------------------------------------------------------
 [lifecycle]
 auto_start = true
 hot_reload = true
