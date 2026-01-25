@@ -59,16 +59,9 @@ import pycolmap
 from scipy.spatial.distance import cdist
 
 # RoMa v2 (romav2)
-_ROMA_OK = False
-_ROMA_ERROR = None
-try:
-    import torch
-    import torch.nn.functional as F
-    from romav2 import RoMaV2
-    _ROMA_OK = True
-except Exception as e:
-    _ROMA_ERROR = str(e)
-    _ROMA_OK = False
+import torch
+import torch.nn.functional as F
+from romav2 import RoMaV2
 
 
 # ==========================
@@ -224,9 +217,6 @@ class RomaMatcher:
     - "turbo": H_lr=320, W_lr=320, H_hr=None, W_hr=None, bidirectional=False
     """
     def __init__(self, device="cuda", mode="outdoor", setting="fast"):
-        if not _ROMA_OK:
-            err_msg = f"romav2 not available: {_ROMA_ERROR}" if _ROMA_ERROR else "romav2 not available"
-            raise RuntimeError(err_msg)
         self.device = torch.device(device)
         # RoMaV2 doesn't have indoor/outdoor distinction - it's a unified model
         # mode is kept for API compatibility but ignored
@@ -633,10 +623,6 @@ def make_cpu_worker(job_q: Queue, res_q: Queue,
 
 def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] = None):
     np.random.seed(args.seed)
-    if not _ROMA_OK:
-        err_msg = f"romav2 not available: {_ROMA_ERROR}" if _ROMA_ERROR else "romav2 not available"
-        raise RuntimeError(err_msg)
-
     scene_root = os.path.abspath(args.scene_root)
     sparse_dir = os.path.join(scene_root, "sparse", "0")
     images_dir = image_dir(scene_root, args.images_subdir)
