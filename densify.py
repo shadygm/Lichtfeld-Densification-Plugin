@@ -36,6 +36,8 @@ Dependencies
 pip install pycolmap romav2 Pillow numpy scipy tqdm open3d  # (open3d optional for --viz)
 """
 
+from __future__ import annotations
+
 import os, sys, argparse, struct, time, threading
 from queue import Queue
 from typing import Dict, Tuple, List, Optional, Callable
