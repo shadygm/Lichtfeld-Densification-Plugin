@@ -13,8 +13,8 @@ min_lichtfeld_version = "1.0.0"
 # -----------------------------------------------------------------------------
 [dependencies]
 packages = [
-    "torch>=2.6.0",
-    "torchvision>=0.23.0",
+    "torch",
+    "torchvision",
     "numpy==2.4.1",
     "pycolmap",
     "Pillow",
