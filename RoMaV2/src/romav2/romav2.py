@@ -113,7 +113,7 @@ class RoMaV2(nn.Module):
         if cfg.compile:
             logger.info(f"Compiling {self.name}...")
             self.compile()
-        logger.info(f"{self.name} initialized.")
+        # logger.info(f"{self.name} initialized.")
 
     def apply_setting(self, setting: Setting):
         if setting in ["mega1500", "scannet1500", "wxbs", "satast"]:
