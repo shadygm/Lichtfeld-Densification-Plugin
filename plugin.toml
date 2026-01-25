@@ -38,8 +38,12 @@ explicit = true
 # Per-package index pinning
 # -----------------------------------------------------------------------------
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
 
 # -----------------------------------------------------------------------------
 # Local packages bundled with the plugin
