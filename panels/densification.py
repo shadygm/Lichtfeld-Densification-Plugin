@@ -1,14 +1,21 @@
 # SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Dense Point Cloud Initialization Panel using RoMa v2."""
+"""Dense Point Cloud Initialization Panel using RoMa v2.
 
+This panel allows users to densify a sparse point cloud using the cameras
+already loaded in LichtFeld Studio. No additional file paths are needed -
+simply load your scene, adjust parameters if desired, and click Start.
+"""
+
+import os
+import tempfile
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
 from typing import Callable, Optional, List
 
 import lichtfeld as lf
+from lfs_plugins.types import Panel
 
 
 class DensifyStage(Enum):
@@ -28,9 +35,7 @@ class DensifyStage(Enum):
 class DensifyConfig:
     """Configuration for dense initialization pipeline."""
 
-    scene_path: Path
-    images_subdir: str = "images"
-    out_name: str = "points3D_dense.bin"
+    output_path: str  # Path for output PLY file
     roma_setting: str = "fast"
     num_refs: float = 0.75
     nns_per_ref: int = 4
@@ -43,17 +48,13 @@ class DensifyConfig:
     no_filter: bool = False
     seed: int = 0
 
-    def __post_init__(self):
-        self.scene_path = Path(self.scene_path)
-
 
 @dataclass
 class DensifyResult:
     """Result of dense initialization."""
 
     success: bool
-    output_path: Optional[Path] = None
-    scene_path: Optional[Path] = None
+    output_path: Optional[str] = None
     num_points: int = 0
     elapsed_time: float = 0.0
     warnings: List[str] = field(default_factory=list)
@@ -61,7 +62,10 @@ class DensifyResult:
 
 
 class DensifyJob:
-    """Background densification job with progress tracking."""
+    """Background densification job with progress tracking.
+    
+    Uses cameras from LichtFeld Studio directly - no file paths needed.
+    """
 
     def __init__(
         self,
@@ -144,18 +148,29 @@ class DensifyJob:
                 with self._lock:
                     return self._cancelled
 
-            self._update(DensifyStage.LOADING, 5.0, "Loading reconstruction...")
+            self._update(DensifyStage.LOADING, 5.0, "Loading cameras from scene...")
             if check_cancelled():
                 self._update(DensifyStage.CANCELLED, 0.0, "Cancelled")
                 return
 
-            # Build args namespace to match densify.py expectations
-            from argparse import Namespace
-            args = Namespace(
-                scene_root=str(self.config.scene_path),
-                images_subdir=self.config.images_subdir,
-                out_name=self.config.out_name,
-                roma_model="outdoor",  # Kept for compatibility
+            # Get cameras from scene graph (each camera is a node with has_camera=True)
+            scene = lf.get_scene()
+            camera_nodes = [n for n in scene.get_nodes() if n.has_camera]
+            if not camera_nodes:
+                raise RuntimeError("No cameras found in scene. Please load a dataset first.")
+            
+            lf.log.info(f"Found {len(camera_nodes)} cameras in scene")
+
+            self._update(DensifyStage.MATCHING, 10.0, "Initializing RoMa v2...")
+            if check_cancelled():
+                self._update(DensifyStage.CANCELLED, 10.0, "Cancelled")
+                return
+
+            # Import and run the LFS-based densify pipeline
+            from ..densify import dense_init_from_lfs, LFSDenseConfig
+
+            lfs_config = LFSDenseConfig(
+                output_path=self.config.output_path,
                 roma_setting=self.config.roma_setting,
                 num_refs=self.config.num_refs,
                 nns_per_ref=self.config.nns_per_ref,
@@ -166,56 +181,47 @@ class DensifyJob:
                 min_parallax_deg=self.config.min_parallax_deg,
                 max_points=self.config.max_points,
                 no_filter=self.config.no_filter,
-                viz=False,
                 seed=self.config.seed,
             )
 
-            self._update(DensifyStage.MATCHING, 10.0, "Initializing the System...")
-            if check_cancelled():
-                self._update(DensifyStage.CANCELLED, 10.0, "Cancelled")
-                return
-
-            # Import and run the densify pipeline
-            from ..densify import dense_init
-
             def progress_cb(pct: float, msg: str):
                 if check_cancelled():
-                    # raising exception to abort dense_init might be abrupt, 
-                    # but dense_init doesn't have a cancel check. 
-                    # For now we just update status and let it finish or wait 
-                    # for the next check points in dense_init if we added them.
-                    # Since we didn't add cancellation hooks in dense_init loops,
-                    # we just update the UI to show cancellation is pending or ignored.
                     return
                 
                 stage = DensifyStage.MATCHING
-                if pct >= 90.0:
+                if pct >= 95.0:
                     stage = DensifyStage.WRITING
-                elif "triangula" in msg.lower():
+                elif pct >= 90.0 or "triangula" in msg.lower():
                     stage = DensifyStage.TRIANGULATING
                 
                 self._update(stage, pct, msg)
 
             # Run the dense initialization
-            result_code = dense_init(args, progress_callback=progress_cb)
+            result_code, result_info = dense_init_from_lfs(
+                camera_nodes, lfs_config, progress_callback=progress_cb
+            )
 
             if result_code != 0:
-                raise RuntimeError(f"Densification failed with code {result_code}")
+                raise RuntimeError(result_info or "Densification failed")
 
             elapsed = time.time() - t0
-            output_path = self.config.scene_path / "sparse" / "0" / "points3D.bin"
+            output_path = result_info  # On success, this is the output path
 
-            # Try to count points from the output file
+            # Count points from the output file (read PLY header)
             num_points = 0
-            if output_path.exists():
-                import struct
+            if output_path and os.path.exists(output_path):
                 with open(output_path, "rb") as f:
-                    num_points = struct.unpack("<Q", f.read(8))[0]
+                    for line in f:
+                        line = line.decode("ascii", errors="ignore").strip()
+                        if line.startswith("element vertex"):
+                            num_points = int(line.split()[-1])
+                            break
+                        if line == "end_header":
+                            break
 
             result = DensifyResult(
                 success=True,
                 output_path=output_path,
-                scene_path=self.config.scene_path,
                 num_points=num_points,
                 elapsed_time=elapsed,
             )
@@ -224,7 +230,7 @@ class DensifyJob:
                 self._result = result
 
             self._update(DensifyStage.DONE, 100.0, "Complete")
-            lf.log.info(f"Densification complete: {num_points} points in {elapsed:.1f}s")
+            lf.log.info(f"Densification complete: {num_points:,} points in {elapsed:.1f}s")
 
             if self.on_complete:
                 self.on_complete(result)
@@ -239,25 +245,36 @@ class DensifyJob:
                 self.on_error(e)
 
 
-class DensificationPanel:
-    """GUI panel for dense point cloud initialization workflow."""
+class DensificationPanel(Panel):
+    """GUI panel for dense point cloud initialization workflow.
+    
+    This panel uses cameras already loaded in LichtFeld Studio.
+    Simply load your scene, adjust parameters if desired, and click Start.
+    The resulting dense point cloud will be automatically added to the scene.
+    """
 
-    panel_label = "Dense Initialization"
-    panel_space = "SIDE_PANEL"
-    panel_order = 5
+    label = "Dense Initialization"
+    space = "MAIN_PANEL_TAB"
+    order = 5
 
     def __init__(self):
         self.job = None
-        self.scene_path = ""
         self.last_result = None
         self._pending_import = None
+        self._auto_import = True  # Auto-import result after completion
 
-        # Settings
-        self.images_subdir = "images"
+        # Quality settings
         self.roma_setting_idx = 3  # "fast" is default
         self.roma_settings = ["precise", "high", "base", "fast", "turbo"]
+        self.roma_descriptions = [
+            "Precise: Highest quality, slowest (800px bidirectional)",
+            "High: High quality, moderate speed (640px bidirectional)", 
+            "Base: Balanced quality/speed (640px)",
+            "Fast: Good quality, fast (512px) - Recommended",
+            "Turbo: Fastest, lower quality (320px)",
+        ]
 
-        # Advanced settings
+        # Advanced settings with reasonable defaults
         self.num_refs = 0.75
         self.nns_per_ref = 4
         self.matches_per_ref = 12000
@@ -268,62 +285,112 @@ class DensificationPanel:
         self.max_points = 0
         self.no_filter = False
 
+    def _get_temp_output_path(self) -> str:
+        """Generate a temporary path for the output PLY file."""
+        temp_dir = tempfile.gettempdir()
+        return os.path.join(temp_dir, "lfs_dense_init.ply")
+
+    def _has_training_data(self) -> bool:
+        """Check if the scene has training cameras loaded."""
+        try:
+            scene = lf.get_scene()
+            cameras = [n for n in scene.get_nodes() if n.has_camera]
+            return cameras is not None and len(cameras) > 0
+        except Exception:
+            return False
+
+    def _get_camera_count(self) -> int:
+        """Get the number of cameras in the scene."""
+        try:
+            scene = lf.get_scene()
+            cameras = [n for n in scene.get_nodes() if n.has_camera]
+            return len(cameras)
+        except Exception:
+            return 0
+
     def draw(self, layout):
         # Check for pending import (must happen on main thread)
         if self._pending_import:
             path = self._pending_import
             self._pending_import = None
-            lf.log.info(f"Executing deferred import on main thread: {path}")
-            lf.app.open(path)
+            lf.log.info(f"Loading dense point cloud: {path}")
+            self._import_ply(path)
 
         layout.heading("Dense Point Cloud Initialization")
-        layout.label("Densify sparse COLMAP reconstruction using RoMa v2")
+        layout.label("Densify sparse reconstruction using RoMa v2 matching")
         layout.separator()
 
-        layout.label("Scene Folder (with sparse/0/):")
-        _, self.scene_path = layout.path_input(
-            "##scenepath", self.scene_path, True, "Select Scene Folder"
-        )
+        # Scene status
+        has_data = self._has_training_data()
+        camera_count = self._get_camera_count() if has_data else 0
+
+        if has_data:
+            layout.label(f"Scene loaded with {camera_count} cameras")
+        else:
+            layout.text_colored("No scene loaded. Please load a dataset first.", (1.0, 0.6, 0.2, 1.0))
+            layout.separator()
+            layout.label("Load a COLMAP dataset or scene to enable densification.")
+            return  # Don't show rest of UI if no scene
 
         layout.separator()
 
-        # Basic settings
-        if layout.collapsing_header("Settings", default_open=True):
-            layout.label("Images Subfolder:")
-            _, self.images_subdir = layout.path_input("##imgsubdir", self.images_subdir, True, "Select Image Folder")
-
+        # Quality settings
+        if layout.collapsing_header("Quality Settings", default_open=True):
             _, self.roma_setting_idx = layout.combo(
-                "Quality", self.roma_setting_idx, self.roma_settings
+                "Matching Quality", self.roma_setting_idx, self.roma_settings
             )
-            layout.label("(precise > high > base > fast > turbo)")
+            layout.label(self.roma_descriptions[self.roma_setting_idx])
 
         # Advanced settings
         if layout.collapsing_header("Advanced Settings", default_open=False):
+            layout.label("Reference View Selection:")
             _, self.num_refs = layout.drag_float(
                 "Reference Fraction", self.num_refs, 0.01, 0.1, 1.0
             )
+            
             _, self.nns_per_ref = layout.drag_int(
                 "Neighbors per Ref", self.nns_per_ref, 1, 1, 10
             )
+
+            layout.separator()
+            layout.label("Matching Parameters:")
+            
             _, self.matches_per_ref = layout.drag_int(
                 "Matches per Ref", self.matches_per_ref, 100, 1000, 50000
             )
+            
             _, self.certainty_thresh = layout.drag_float(
                 "Min Certainty", self.certainty_thresh, 0.01, 0.0, 1.0
             )
+
+            layout.separator()
+            layout.label("Geometric Filtering:")
+            
             _, self.reproj_thresh = layout.drag_float(
                 "Max Reproj Error (px)", self.reproj_thresh, 0.1, 0.1, 10.0
             )
+            
             _, self.sampson_thresh = layout.drag_float(
                 "Max Sampson Error", self.sampson_thresh, 0.5, 0.0, 50.0
             )
+            
             _, self.min_parallax_deg = layout.drag_float(
                 "Min Parallax (deg)", self.min_parallax_deg, 0.1, 0.0, 10.0
             )
+
+            layout.separator()
+            layout.label("Output Options:")
+            
             _, self.max_points = layout.drag_int(
                 "Max Points (0=unlimited)", self.max_points, 1000, 0, 10000000
             )
-            _, self.no_filter = layout.checkbox("No Filtering", self.no_filter)
+            
+            _, self.no_filter = layout.checkbox("Disable Filtering", self.no_filter)
+
+        layout.separator()
+
+        # Auto-import option
+        _, self._auto_import = layout.checkbox("Auto-add to scene", self._auto_import)
 
         layout.separator()
 
@@ -332,7 +399,7 @@ class DensificationPanel:
             stage = self.job.stage.value
             progress = self.job.progress
 
-            layout.label(f"Stage: {stage}")
+            layout.label(f"Stage: {stage.capitalize()}")
             layout.progress_bar(progress / 100.0, self.job.status)
 
             if layout.button("Cancel"):
@@ -345,39 +412,32 @@ class DensificationPanel:
         if self.last_result and self.last_result.success:
             layout.separator()
             layout.heading("Results")
-            layout.label(f"Points: {self.last_result.num_points:,}")
+            layout.label(f"Points generated: {self.last_result.num_points:,}")
             layout.label(f"Time: {self.last_result.elapsed_time:.1f}s")
 
-            if layout.button("Import to Scene##densify_import", (0, 36)):
-                lf.log.info("Import to Scene button clicked")
-                self._import_scene()
+            if self.last_result.output_path:
+                if not self._auto_import:
+                    if layout.button("Add to Scene", (0, 36)):
+                        self._import_ply(self.last_result.output_path)
 
         if self.last_result and not self.last_result.success:
             layout.separator()
-            layout.label("Error:")
+            layout.text_colored("Error:", (1.0, 0.3, 0.3, 1.0))
             layout.text_selectable(self.last_result.error or "Unknown error", 60)
 
     def _start(self):
-        if not self.scene_path:
-            lf.log.warn("No scene path specified")
-            return
-
-        scene_path = Path(self.scene_path)
-        sparse_dir = scene_path / "sparse" / "0"
-
-        if not sparse_dir.exists():
-            lf.log.error(f"Sparse reconstruction not found at {sparse_dir}")
+        if not self._has_training_data():
+            lf.log.warn("No training cameras found in scene")
             self.last_result = DensifyResult(
                 success=False,
-                error=f"Sparse reconstruction not found at {sparse_dir}"
+                error="No training cameras found. Please load a dataset first."
             )
             return
 
         self.last_result = None
 
         config = DensifyConfig(
-            scene_path=scene_path,
-            images_subdir=self.images_subdir,
+            output_path=self._get_temp_output_path(),
             roma_setting=self.roma_settings[self.roma_setting_idx],
             num_refs=self.num_refs,
             nns_per_ref=self.nns_per_ref,
@@ -398,20 +458,138 @@ class DensificationPanel:
         self.job.start()
 
     def _on_complete(self, result: DensifyResult):
-        lf.log.info(f"Densification complete: {result.num_points} points")
+        lf.log.info(f"Densification complete: {result.num_points:,} points")
         self.last_result = result
+        
+        # Auto-import if enabled
+        if self._auto_import and result.output_path:
+            self._pending_import = result.output_path
 
     def _on_error(self, error: Exception):
         lf.log.error(f"Densification failed: {error}")
         self.last_result = DensifyResult(success=False, error=str(error))
 
-    def _import_scene(self):
-        """Import the scene into LichtFeld Studio."""
-        if not self.last_result or not self.last_result.scene_path:
-            lf.log.warn("No scene path available to import")
+    def _import_ply(self, ply_path: str):
+        """Import the dense PLY point cloud and swap it with the current training model."""
+        if not ply_path or not os.path.exists(ply_path):
+            lf.log.warn(f"PLY file not found: {ply_path}")
             return
-
-        # Queue import for main thread (scene_path is the root with sparse/0/)
-        scene_path = str(self.last_result.scene_path)
-        lf.log.info(f"Queueing import: {scene_path}")
-        self._pending_import = scene_path
+        
+        try:
+            lf.log.info(f"Loading PLY: {ply_path}")
+            load_result = lf.io.load(ply_path)
+            
+            if load_result is None or load_result.splat_data is None:
+                lf.log.error("Failed to load PLY file or no point data found")
+                return
+            
+            scene = lf.get_scene()
+            if scene is None:
+                lf.log.error("No scene available")
+                return
+            
+            splat_data = load_result.splat_data
+            num_points = splat_data.num_points
+            
+            # Get the current training model node to preserve its metadata
+            training_node_name = scene.training_model_node_name
+            old_node = None
+            parent_id = -1
+            local_transform = None
+            
+            if training_node_name:
+                try:
+                    old_node = scene.get_node(training_node_name)
+                    if old_node:
+                        parent_id = old_node.parent_id
+                        local_transform = old_node.local_transform
+                        lf.log.info(f"Found training model: {training_node_name}")
+                except Exception as e:
+                    lf.log.warn(f"Could not get training node metadata: {e}")
+            
+            # Get raw tensors from splat data
+            means = splat_data.means_raw
+            
+            try:
+                sh0 = splat_data.sh0_raw
+            except:
+                sh0 = lf.Tensor.full([num_points, 1, 3], 0.5)
+            
+            try:
+                shN = splat_data.shN_raw
+            except:
+                shN = lf.Tensor.zeros([num_points, 0, 3])
+            
+            try:
+                scaling = splat_data.scaling_raw
+            except:
+                scaling = lf.Tensor.full([num_points, 3], -5.0)
+            
+            try:
+                rotation = splat_data.rotation_raw
+            except:
+                rotation = lf.Tensor.zeros([num_points, 4])
+            
+            try:
+                opacity = splat_data.opacity_raw
+            except:
+                opacity = lf.Tensor.zeros([num_points, 1])
+            
+            # If we have a training node to replace, use the "perfect swap" strategy
+            if old_node and training_node_name:
+                lf.log.info(f"Replacing '{training_node_name}' with dense cloud (perfect swap)")
+                
+                # Remove the old sparse node to free the name and spot
+                scene.remove_node(training_node_name)
+                
+                # Add dense node with same name and parent
+                new_node_id = scene.add_splat(
+                    name=training_node_name,
+                    means=means,
+                    sh0=sh0,
+                    shN=shN,
+                    scaling=scaling,
+                    rotation=rotation,
+                    opacity=opacity,
+                    sh_degree=0,
+                    scene_scale=1.0,
+                    parent=parent_id if parent_id != -1 else None
+                )
+                
+                # Re-apply the original transform if it existed
+                if new_node_id is not None and local_transform is not None:
+                    try:
+                        scene.set_node_transform(training_node_name, local_transform)
+                    except Exception as e:
+                        lf.log.warn(f"Could not restore transform: {e}")
+                
+                # Set as training model
+                if new_node_id is not None:
+                    scene.set_training_model_node(training_node_name)
+                    lf.log.info(f"Dense cloud swapped in-place as training model ({num_points:,} points)")
+            else:
+                # Fallback: Just add a new node if no training model exists
+                lf.log.info("No existing training model found, adding dense cloud as new node")
+                
+                new_node_id = scene.add_splat(
+                    name="Dense Points (RoMa)",
+                    means=means,
+                    sh0=sh0,
+                    shN=shN,
+                    scaling=scaling,
+                    rotation=rotation,
+                    opacity=opacity,
+                    sh_degree=0,
+                    scene_scale=1.0,
+                )
+                
+                if new_node_id is not None:
+                    node = scene.get_node_by_id(new_node_id)
+                    if node:
+                        scene.set_training_model_node(node.name)
+                        lf.log.info(f"Added '{node.name}' as training model ({num_points:,} points)")
+                
+        except Exception as e:
+            lf.log.error(f"Failed to import PLY: {e}")
+            import traceback
+            traceback.print_exc()

@@ -448,9 +448,33 @@ def write_points3D_bin(path_out: str, xyz: np.ndarray, rgb_uint8: np.ndarray, er
         for i in range(N):
             f.write(struct.pack("<Q", i+1))
             f.write(struct.pack("<ddd", float(xyz[i,0]), float(xyz[i,1]), float(xyz[i,2])))
+
+
+def write_ply(path_out: str, xyz: np.ndarray, rgb_uint8: np.ndarray):
+    """Write a PLY point cloud file.
+    
+    Args:
+        path_out: Output path for PLY file
+        xyz: [N, 3] float array of 3D positions
+        rgb_uint8: [N, 3] uint8 array of RGB colors
+    """
+    N = xyz.shape[0]
+    header = f"""ply
+format binary_little_endian 1.0
+element vertex {N}
+property float x
+property float y
+property float z
+property uchar red
+property uchar green
+property uchar blue
+end_header
+"""
+    with open(path_out, "wb") as f:
+        f.write(header.encode("ascii"))
+        for i in range(N):
+            f.write(struct.pack("<fff", float(xyz[i,0]), float(xyz[i,1]), float(xyz[i,2])))
             f.write(struct.pack("BBB", int(rgb_uint8[i,0]), int(rgb_uint8[i,1]), int(rgb_uint8[i,2])))
-            f.write(struct.pack("<d", float(errors[i])))
-            f.write(struct.pack("<Q", 0))  # empty track
 
 
 # ==========================
@@ -842,26 +866,361 @@ def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] =
     if progress_callback:
         progress_callback(95.0, "Writing output...")
 
-    # Write COLMAP points3D.bin
-    import shutil
-
-    canonical_path = os.path.join(sparse_dir, "points3D.bin")
-    backup_path    = os.path.join(sparse_dir, "points3D.original.save")
-    dense_tmp_path = os.path.join(sparse_dir, "points3D_dense.tmp.bin")
-
-    # 1. Write dense cloud to a temporary file first (safe write)
-    write_points3D_bin(dense_tmp_path, xyz, to_uint8_rgb(rgb), errors=err)
-
-    # 2. Backup original sparse cloud ONCE
-    if os.path.exists(canonical_path) and not os.path.exists(backup_path):
-        shutil.copy2(canonical_path, backup_path)
-        log(f"Backed up original sparse cloud -> {backup_path}")
-
-    # 3. Atomically replace canonical points3D.bin
-    os.replace(dense_tmp_path, canonical_path)
-    log(f"Installed dense cloud as canonical -> {canonical_path}")
-
     return 0
+
+
+# ==========================
+# LFS-based dense initialization
+# ==========================
+
+from dataclasses import dataclass as _dataclass
+
+@_dataclass
+class LFSCameraData:
+    """Camera data extracted from LichtFeld Studio."""
+    uid: int
+    image_path: str
+    width: int
+    height: int
+    K: np.ndarray          # [3, 3] intrinsics
+    R: np.ndarray          # [3, 3] rotation (world-to-camera)
+    t: np.ndarray          # [3, 1] translation (world-to-camera)
+    P: np.ndarray          # [3, 4] projection matrix
+    C: np.ndarray          # [3] camera center in world coords
+
+
+@_dataclass
+class LFSDenseConfig:
+    """Configuration for LFS-based dense initialization."""
+    output_path: str                # Path for output PLY file
+    roma_setting: str = "fast"
+    num_refs: float = 0.75
+    nns_per_ref: int = 4
+    matches_per_ref: int = 12000
+    certainty_thresh: float = 0.20
+    reproj_thresh: float = 1.5
+    sampson_thresh: float = 5.0
+    min_parallax_deg: float = 0.5
+    max_points: int = 0
+    no_filter: bool = False
+    seed: int = 0
+
+
+def extract_cameras_from_lfs(camera_nodes) -> List[LFSCameraData]:
+    """Extract camera data from LichtFeld Studio scene graph camera nodes.
+    
+    Args:
+        camera_nodes: List of scene nodes with has_camera=True
+        
+    Returns:
+        List of LFSCameraData with all camera information
+    """
+    camera_list = []
+    
+    for node in camera_nodes:
+        if not node.has_camera:
+            continue
+            
+        # Get image dimensions
+        width = node.camera_width
+        height = node.camera_height
+        
+        # Build intrinsic matrix K from focal lengths and principal point (center)
+        fx = node.camera_focal_x
+        fy = node.camera_focal_y
+        cx = width / 2.0   # Principal point at image center
+        cy = height / 2.0
+        
+        K = np.array([
+            [fx, 0.0, cx],
+            [0.0, fy, cy],
+            [0.0, 0.0, 1.0]
+        ], dtype=np.float64)
+        
+        # Get rotation and translation (world-to-camera)
+        # camera_R and camera_T are Tensors - convert to numpy arrays
+        R = np.asarray(node.camera_R).astype(np.float64)  # [3, 3]
+        T = np.asarray(node.camera_T).astype(np.float64).reshape(3, 1)  # [3, 1]
+        
+        # Compute projection matrix P = K @ [R | t]
+        P = K @ np.concatenate([R, T], axis=1)  # [3, 4]
+        
+        # Camera center in world coordinates: C = -R^T @ t
+        C = (-R.T @ T).reshape(3)
+        
+        camera_data = LFSCameraData(
+            uid=node.camera_uid,
+            image_path=node.image_path,
+            width=width,
+            height=height,
+            K=K,
+            R=R,
+            t=T,
+            P=P,
+            C=C
+        )
+        camera_list.append(camera_data)
+    
+    return camera_list
+
+
+def dense_init_from_lfs(
+    camera_nodes,  # List of scene nodes with has_camera=True
+    config: LFSDenseConfig,
+    progress_callback: Optional[Callable[[float, str], None]] = None
+) -> Tuple[int, Optional[str]]:
+    """Run dense initialization using camera nodes from LichtFeld Studio scene graph.
+    
+    Args:
+        camera_nodes: List of scene nodes with has_camera=True
+        config: LFSDenseConfig with parameters
+        progress_callback: Optional callback for progress updates
+        
+    Returns:
+        Tuple of (return_code, output_path or error_message)
+    """
+    np.random.seed(config.seed)
+    
+    if progress_callback:
+        progress_callback(2.0, "Extracting camera data from scene...")
+    
+    # Extract camera data from LFS scene graph nodes
+    camera_list = extract_cameras_from_lfs(camera_nodes)
+    if len(camera_list) < 2:
+        return 1, "Need at least 2 cameras for dense initialization"
+    
+    log(f"Loaded {len(camera_list)} cameras from LichtFeld Studio.")
+    
+    # Build lookup dictionaries by UID
+    K_by: Dict[int, np.ndarray] = {}
+    R_by: Dict[int, np.ndarray] = {}
+    t_by: Dict[int, np.ndarray] = {}
+    P_by: Dict[int, np.ndarray] = {}
+    C_by: Dict[int, np.ndarray] = {}
+    path_by: Dict[int, str] = {}
+    size_by: Dict[int, Tuple[int, int]] = {}
+    
+    img_ids = []
+    flat_poses = []
+    
+    for cam in camera_list:
+        uid = cam.uid
+        img_ids.append(uid)
+        K_by[uid] = cam.K
+        R_by[uid] = cam.R
+        t_by[uid] = cam.t
+        P_by[uid] = cam.P
+        C_by[uid] = cam.C
+        path_by[uid] = cam.image_path
+        size_by[uid] = (cam.width, cam.height)
+        
+        # Build flat pose for neighbor selection
+        T = np.eye(4)
+        T[:3, :3] = cam.R
+        T[:3, 3] = cam.t.reshape(3)
+        flat_poses.append(T.reshape(-1))
+    
+    flat_poses = np.stack(flat_poses, axis=0)
+    
+    if progress_callback:
+        progress_callback(5.0, "Selecting reference views...")
+    
+    # Reference selection using k-centers on poses
+    num_refs = int(round(config.num_refs * len(img_ids))) if config.num_refs <= 1.0 else int(config.num_refs)
+    refs_local = select_cameras_kcenters(flat_poses, num_refs)
+    refs = [img_ids[i] for i in refs_local]
+    
+    log(f"Selected {len(refs)} reference views.")
+    
+    # Compute nearest neighbors
+    nn_table = nearest_neighbors(flat_poses, max(1, config.nns_per_ref))
+    
+    # Create args namespace for CPU worker compatibility
+    from argparse import Namespace
+    args = Namespace(
+        matches_per_ref=config.matches_per_ref,
+        sampson_thresh=config.sampson_thresh,
+        reproj_thresh=config.reproj_thresh,
+        min_parallax_deg=config.min_parallax_deg,
+        no_filter=config.no_filter,
+    )
+    
+    matcher = None
+    worker_thread = None
+    job_q = Queue(maxsize=8)
+    res_q = Queue()
+    
+    try:
+        # Initialize RoMa v2 matcher
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        matcher = RomaMatcher(device=device, mode="outdoor", setting=config.roma_setting)
+        log(f"RoMaV2: setting={config.roma_setting} on {device}")
+        
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            torch.backends.cudnn.benchmark = True
+            log("Enabled CUDA optimizations: TF32, cuDNN benchmark")
+        
+        # Start CPU worker
+        worker_fn = make_cpu_worker(
+            job_q, res_q,
+            K_by, R_by, t_by, P_by, C_by, path_by, size_by,
+            args, matcher.sample_thresh, no_filter=config.no_filter
+        )
+        worker_thread = threading.Thread(target=worker_fn, daemon=True)
+        worker_thread.start()
+        
+        # Producer loop
+        jobs_enqueued = 0
+        t0 = time.time()
+        total_refs = len(refs_local)
+        w_match, h_match = matcher.w_resized, matcher.h_resized
+        
+        for i, ref_local in enumerate(tqdm(refs_local, desc="GPU matching / enqueue")):
+            if progress_callback:
+                pct = 10.0 + (float(i) / max(1, total_refs)) * 80.0
+                progress_callback(pct, f"Matching view {i+1}/{total_refs}")
+            
+            ref_id = img_ids[ref_local]
+            ref_path = path_by[ref_id]
+            
+            # Load and resize reference image
+            try:
+                imA = load_rgb_resized(ref_path, (w_match, h_match))
+            except Exception as e:
+                log(f"Warning: failed to load reference {ref_path}: {e}")
+                continue
+            
+            imA_np = np.asarray(imA, dtype=np.uint8)
+            wA_cam, hA_cam = size_by[ref_id]
+            
+            local_nns = nn_table[ref_local][:config.nns_per_ref]
+            if len(local_nns) == 0:
+                continue
+            
+            warp_list_cpu: List[torch.Tensor] = []
+            cert_list_cpu: List[torch.Tensor] = []
+            nn_ids: List[int] = []
+            
+            # Load neighbor images
+            def load_neighbor(nn_local):
+                nbr_id = img_ids[nn_local]
+                if nbr_id == ref_id:
+                    return None, None, None
+                try:
+                    img_path = path_by[nbr_id]
+                    imB = load_rgb_resized(img_path, (w_match, h_match))
+                    return imB, nn_local, nbr_id
+                except Exception as e:
+                    log(f"Warning: failed to load neighbor: {e}")
+                    return None, None, None
+            
+            nn_images = []
+            valid_nn_locals = []
+            
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                load_results = list(executor.map(load_neighbor, local_nns))
+            
+            for imB, nn_local, nbr_id in load_results:
+                if imB is not None:
+                    nn_images.append(imB)
+                    valid_nn_locals.append(nn_local)
+                    nn_ids.append(nbr_id)
+            
+            if not nn_images:
+                continue
+            
+            # Batch match on GPU
+            batch_results = matcher.match_grids_batch(imA, nn_images)
+            
+            for warp_hw, cert_hw in batch_results:
+                cert_hw = torch.clamp(cert_hw, min=config.certainty_thresh)
+                warp_cpu = warp_hw.detach().to("cpu", non_blocking=True)
+                cert_cpu = cert_hw.detach().to("cpu", non_blocking=True)
+                warp_list_cpu.append(warp_cpu)
+                cert_list_cpu.append(cert_cpu)
+            
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            
+            del batch_results
+            
+            if not cert_list_cpu:
+                continue
+            
+            job = dict(
+                ref_id=ref_id,
+                nn_ids=nn_ids,
+                warp_list=warp_list_cpu,
+                cert_list=cert_list_cpu,
+                imA_np=imA_np,
+                w_match=w_match, h_match=h_match,
+                wA_cam=wA_cam, hA_cam=hA_cam,
+            )
+            job_q.put(job)
+            jobs_enqueued += 1
+    
+    finally:
+        if matcher is not None:
+            del matcher
+            matcher = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+        log("RoMaV2 model unloaded and GPU memory cleared.")
+    
+    # Signal worker to finish
+    if progress_callback:
+        progress_callback(90.0, "Finalizing triangulation...")
+    
+    job_q.put(None)
+    job_q.join()
+    if worker_thread:
+        worker_thread.join(timeout=1.0)
+    
+    # Collect results
+    all_xyz, all_rgb, all_err = [], [], []
+    results_collected = 0
+    while results_collected < jobs_enqueued:
+        try:
+            xyz, rgb, err = res_q.get_nowait()
+        except Exception:
+            break
+        results_collected += 1
+        if xyz is None:
+            continue
+        all_xyz.append(xyz)
+        all_rgb.append(rgb)
+        all_err.append(err)
+    
+    if not all_xyz:
+        return 1, "No points triangulated. Try adjusting parameters."
+    
+    xyz = np.concatenate(all_xyz, axis=0)
+    rgb = np.concatenate(all_rgb, axis=0)
+    err = np.concatenate(all_err, axis=0)
+    log(f"Triangulated points: {xyz.shape[0]} in {time.time()-t0:.1f}s")
+    
+    # Optional cap
+    if config.max_points > 0 and xyz.shape[0] > config.max_points:
+        sel = np.random.default_rng(config.seed).choice(xyz.shape[0], size=config.max_points, replace=False)
+        xyz, rgb, err = xyz[sel], rgb[sel], err[sel]
+        log(f"Capped to {xyz.shape[0]} points (max_points).")
+    
+    if progress_callback:
+        progress_callback(95.0, "Writing output PLY...")
+    
+    # Write PLY file
+    output_path = config.output_path
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    write_ply(output_path, xyz, to_uint8_rgb(rgb))
+    log(f"Wrote dense point cloud to {output_path}")
+    
+    if progress_callback:
+        progress_callback(100.0, f"Done! {xyz.shape[0]:,} points")
+    
+    return 0, output_path
 
 
 # ==========================
