@@ -497,7 +497,7 @@ class DensificationPanel(Panel):
             return
 
         try:
-            lf.log.info(f"Loading PLY: {ply_path}")
+            lf.log.debug(f"Loading PLY: {ply_path}")
 
             scene = lf.get_scene()
             if scene is None:
@@ -518,7 +518,7 @@ class DensificationPanel(Panel):
             # Load raw point cloud data (positions + colors)
             means, colors = lf.io.load_point_cloud(ply_path)
 
-            lf.log.info(
+            lf.log.debug(
                 f"Loaded PLY: {means.shape[0]:,} points, "
                 f"bounds=[{means.min(0).numpy()}, {means.max(0).numpy()}]"
             )
