@@ -12,9 +12,9 @@ class DensePipelineConfig:
     nns_per_ref: int = 4
     matches_per_ref: int = 12000
     certainty_thresh: float = 0.20
-    reproj_thresh: float = 1.5
-    sampson_thresh: float = 5.0
-    min_parallax_deg: float = 0.5
+    reproj_thresh: float = 0.5
+    sampson_thresh: float = 15.0
+    min_parallax_deg: float = 0.2
     max_points: int = 0
     no_filter: bool = False
     seed: int = 0
