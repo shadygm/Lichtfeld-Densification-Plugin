@@ -470,126 +470,51 @@ class DensificationPanel(Panel):
         self.last_result = DensifyResult(success=False, error=str(error))
 
     def _import_ply(self, ply_path: str):
-        """Import the dense PLY point cloud and swap it with the current training model."""
+        """Replace the existing point cloud node with the dense PLY data."""
         if not ply_path or not os.path.exists(ply_path):
             lf.log.warn(f"PLY file not found: {ply_path}")
             return
-        
+
         try:
             lf.log.info(f"Loading PLY: {ply_path}")
-            load_result = lf.io.load(ply_path)
-            
-            if load_result is None or load_result.splat_data is None:
-                lf.log.error("Failed to load PLY file or no point data found")
-                return
-            
+
             scene = lf.get_scene()
             if scene is None:
                 lf.log.error("No scene available")
                 return
-            
-            splat_data = load_result.splat_data
-            num_points = splat_data.num_points
-            
-            # Get the current training model node to preserve its metadata
-            training_node_name = scene.training_model_node_name
-            old_node = None
-            parent_id = -1
-            local_transform = None
-            
-            if training_node_name:
-                try:
-                    old_node = scene.get_node(training_node_name)
-                    if old_node:
-                        parent_id = old_node.parent_id
-                        local_transform = old_node.local_transform
-                        lf.log.info(f"Found training model: {training_node_name}")
-                except Exception as e:
-                    lf.log.warn(f"Could not get training node metadata: {e}")
-            
-            # Get raw tensors from splat data
-            means = splat_data.means_raw
-            
-            try:
-                sh0 = splat_data.sh0_raw
-            except:
-                sh0 = lf.Tensor.full([num_points, 1, 3], 0.5)
-            
-            try:
-                shN = splat_data.shN_raw
-            except:
-                shN = lf.Tensor.zeros([num_points, 0, 3])
-            
-            try:
-                scaling = splat_data.scaling_raw
-            except:
-                scaling = lf.Tensor.full([num_points, 3], -5.0)
-            
-            try:
-                rotation = splat_data.rotation_raw
-            except:
-                rotation = lf.Tensor.zeros([num_points, 4])
-            
-            try:
-                opacity = splat_data.opacity_raw
-            except:
-                opacity = lf.Tensor.zeros([num_points, 1])
-            
-            # If we have a training node to replace, use the "perfect swap" strategy
-            if old_node and training_node_name:
-                lf.log.info(f"Replacing '{training_node_name}' with dense cloud (perfect swap)")
-                
-                # Remove the old sparse node to free the name and spot
-                scene.remove_node(training_node_name)
-                
-                # Add dense node with same name and parent
-                new_node_id = scene.add_splat(
-                    name=training_node_name,
-                    means=means,
-                    sh0=sh0,
-                    shN=shN,
-                    scaling=scaling,
-                    rotation=rotation,
-                    opacity=opacity,
-                    sh_degree=0,
-                    scene_scale=1.0,
-                    parent=parent_id if parent_id != -1 else None
-                )
-                
-                # Re-apply the original transform if it existed
-                if new_node_id is not None and local_transform is not None:
-                    try:
-                        scene.set_node_transform(training_node_name, local_transform)
-                    except Exception as e:
-                        lf.log.warn(f"Could not restore transform: {e}")
-                
-                # Set as training model
-                if new_node_id is not None:
-                    scene.set_training_model_node(training_node_name)
-                    lf.log.info(f"Dense cloud swapped in-place as training model ({num_points:,} points)")
-            else:
-                # Fallback: Just add a new node if no training model exists
-                lf.log.info("No existing training model found, adding dense cloud as new node")
-                
-                new_node_id = scene.add_splat(
-                    name="Dense Points (RoMa)",
-                    means=means,
-                    sh0=sh0,
-                    shN=shN,
-                    scaling=scaling,
-                    rotation=rotation,
-                    opacity=opacity,
-                    sh_degree=0,
-                    scene_scale=1.0,
-                )
-                
-                if new_node_id is not None:
-                    node = scene.get_node_by_id(new_node_id)
-                    if node:
-                        scene.set_training_model_node(node.name)
-                        lf.log.info(f"Added '{node.name}' as training model ({num_points:,} points)")
-                
+
+            # Find the first POINTCLOUD node in the scene
+            target = None
+            for n in scene.get_nodes():
+                if n.type == lf.scene.NodeType.POINTCLOUD:
+                    target = n
+                    break
+
+            if not target:
+                lf.log.error("No point cloud node found to replace")
+                return
+
+            # Load raw point cloud data (positions + colors)
+            means, colors = lf.io.load_point_cloud(ply_path)
+
+            lf.log.info(
+                f"Loaded PLY: {means.shape[0]:,} points, "
+                f"bounds=[{means.min(0).numpy()}, {means.max(0).numpy()}]"
+            )
+
+            pc = target.point_cloud()
+            if not pc:
+                lf.log.error(f"Node '{target.name}' has no point cloud data")
+                return
+
+            # Replace data in-place
+            pc.set_data(means, colors)
+
+            lf.log.info(
+                f"Replaced '{target.name}' with dense cloud "
+                f"({means.shape[0]:,} points)"
+            )
+
         except Exception as e:
             lf.log.error(f"Failed to import PLY: {e}")
-            import traceback
-            traceback.print_exc()
+
