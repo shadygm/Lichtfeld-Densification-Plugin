@@ -63,12 +63,13 @@ import torch
 import torch.nn.functional as F
 from romav2 import RoMaV2
 
+# LichtFeld logging
+import lichtfeld as lf
+
 
 # ==========================
 # Small utilities
-# ==========================
-
-def log(s): print(f"[dense-init] {s}")
+# =========================="
 
 def image_dir(scene_root: str, preferred: str) -> str:
     cand = os.path.join(scene_root, preferred)
@@ -243,7 +244,7 @@ class RomaMatcher:
         # Store resolution for reference
         self.w_resized = self.model.W_lr
         self.h_resized = self.model.H_lr
-        log(f"RoMaV2 initialized with setting='{setting}' (H_lr={self.model.H_lr}, W_lr={self.model.W_lr}) on {device}")
+        lf.log.info(f"RoMaV2 initialized with setting='{setting}' (H_lr={self.model.H_lr}, W_lr={self.model.W_lr}) on {device}")
 
     def _preprocess_image_batch(self, images: List[Image.Image]) -> torch.Tensor:
         """Convert PIL images to normalized tensor batch on GPU.
@@ -634,7 +635,7 @@ def make_cpu_worker(job_q: Queue, res_q: Queue,
                     res_q.put((None, None, None))
 
             except Exception as ex:
-                log(f"CPU worker error: {ex}")
+                lf.log.error(f"CPU worker error: {ex}")
                 res_q.put((None, None, None))
             finally:
                 job_q.task_done()
@@ -651,13 +652,13 @@ def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] =
     sparse_dir = os.path.join(scene_root, "sparse", "0")
     images_dir = image_dir(scene_root, args.images_subdir)
 
-    log(f"Scene   : {scene_root}")
-    log(f"Sparse  : {sparse_dir}")
-    log(f"Images  : {images_dir}")
+    lf.log.debug(f"Scene   : {scene_root}")
+    lf.log.debug(f"Sparse  : {sparse_dir}")
+    lf.log.debug(f"Images  : {images_dir}")
 
     rec, cams, imgs = load_reconstruction(sparse_dir)
     img_ids = sorted(list(imgs.keys()))
-    log(f"Loaded {len(cams)} cameras, {len(imgs)} images.")
+    lf.log.info(f"Loaded {len(cams)} cameras, {len(imgs)} images.")
 
     # Camera / pose dicts
     K_by: Dict[int,np.ndarray] = {}
@@ -686,12 +687,12 @@ def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] =
     # Reference selection + neighbors
     num_refs = int(round(args.num_refs * len(img_ids))) if args.num_refs <= 1.0 else int(args.num_refs)
     try:
-        log("Selecting reference views by sparse visibility...")
+        lf.log.debug("Selecting reference views by sparse visibility...")
         refs = select_cameras_by_visibility(rec, num_refs)
         img_id_to_local_idx = {iid: i for i, iid in enumerate(img_ids)}
         refs_local = [img_id_to_local_idx[i] for i in refs]
     except (ValueError, KeyError) as e:
-        log(f"Visibility selection failed ({e}), using k-centers on poses.")
+        lf.log.warn(f"Visibility selection failed ({e}), using k-centers on poses.")
         refs_local = select_cameras_kcenters(flat_poses, num_refs)
         refs = [img_ids[i] for i in refs_local]
 
@@ -706,7 +707,7 @@ def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] =
         # RoMa v2 matcher (GPU if available)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         matcher = RomaMatcher(device=device, mode=args.roma_model, setting=args.roma_setting)
-        log(f"RoMaV2: setting={args.roma_setting} on {device}")
+        lf.log.info(f"RoMaV2: setting={args.roma_setting} on {device}")
         
         # Enable CUDA optimizations
         if torch.cuda.is_available():
@@ -715,7 +716,6 @@ def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] =
             torch.backends.cudnn.allow_tf32 = True
             # Enable cuDNN autotuner for optimal convolution algorithms
             torch.backends.cudnn.benchmark = True
-            log("Enabled CUDA optimizations: TF32, cuDNN benchmark")
 
         # Queues & worker
         worker_fn = make_cpu_worker(job_q, res_q,
@@ -763,7 +763,7 @@ def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] =
                     imB = load_rgb_resized(img_path, (w_match, h_match))
                     return imB, nn_local, nbr_id
                 except Exception as e:
-                    log(f"Warning: failed to load neighbor {name_by.get(nbr_id, 'unknown')}: {e}")
+                    lf.log.warn(f"Failed to load neighbor {name_by.get(nbr_id, 'unknown')}: {e}")
                     return None, None, None
             
             nn_images = []
@@ -825,7 +825,7 @@ def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] =
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
-        log("RoMaV2 model unloaded and GPU memory cleared.")
+        lf.log.debug("RoMaV2 model unloaded and GPU memory cleared.")
 
     # Signal worker to finish and wait
     if progress_callback:
@@ -855,13 +855,13 @@ def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] =
     xyz = np.concatenate(all_xyz, axis=0)
     rgb = np.concatenate(all_rgb, axis=0)
     err = np.concatenate(all_err, axis=0)
-    log(f"Triangulated points: {xyz.shape[0]} in {time.time()-t0:.1f}s (pipelined GPU↔CPU).")
+    lf.log.debug(f"Triangulated points: {xyz.shape[0]} in {time.time()-t0:.1f}s (pipelined GPU↔CPU).")
 
     # Optional cap
     if args.max_points > 0 and xyz.shape[0] > args.max_points:
         sel = np.random.default_rng(args.seed).choice(xyz.shape[0], size=args.max_points, replace=False)
         xyz, rgb, err = xyz[sel], rgb[sel], err[sel]
-        log(f"Capped to {xyz.shape[0]} points (--max_points).")
+        lf.log.debug(f"Capped to {xyz.shape[0]} points (--max_points).")
 
     if progress_callback:
         progress_callback(95.0, "Writing output...")
@@ -904,6 +904,7 @@ class LFSDenseConfig:
     max_points: int = 0
     no_filter: bool = False
     seed: int = 0
+    viz_interval: int = 10  # Visualize every N pairs (0 = only at end)
 
 
 def extract_cameras_from_lfs(camera_nodes) -> List[LFSCameraData]:
@@ -967,7 +968,8 @@ def extract_cameras_from_lfs(camera_nodes) -> List[LFSCameraData]:
 def dense_init_from_lfs(
     camera_nodes,  # List of scene nodes with has_camera=True
     config: LFSDenseConfig,
-    progress_callback: Optional[Callable[[float, str], None]] = None
+    progress_callback: Optional[Callable[[float, str], None]] = None,
+    on_sequential_viz: Optional[Callable[[str], None]] = None,
 ) -> Tuple[int, Optional[str]]:
     """Run dense initialization using camera nodes from LichtFeld Studio scene graph.
     
@@ -975,6 +977,7 @@ def dense_init_from_lfs(
         camera_nodes: List of scene nodes with has_camera=True
         config: LFSDenseConfig with parameters
         progress_callback: Optional callback for progress updates
+        on_sequential_viz: Optional callback for sequential PLY visualization every 10 image pairs
         
     Returns:
         Tuple of (return_code, output_path or error_message)
@@ -989,7 +992,7 @@ def dense_init_from_lfs(
     if len(camera_list) < 2:
         return 1, "Need at least 2 cameras for dense initialization"
     
-    log(f"Loaded {len(camera_list)} cameras from LichtFeld Studio.")
+    lf.log.debug(f"Loaded {len(camera_list)} cameras from LichtFeld Studio.")
     
     # Build lookup dictionaries by UID
     K_by: Dict[int, np.ndarray] = {}
@@ -1030,7 +1033,7 @@ def dense_init_from_lfs(
     refs_local = select_cameras_kcenters(flat_poses, num_refs)
     refs = [img_ids[i] for i in refs_local]
     
-    log(f"Selected {len(refs)} reference views.")
+    lf.log.debug(f"Selected {len(refs)} reference views.")
     
     # Compute nearest neighbors
     nn_table = nearest_neighbors(flat_poses, max(1, config.nns_per_ref))
@@ -1047,20 +1050,83 @@ def dense_init_from_lfs(
     
     matcher = None
     worker_thread = None
+    collector_thread = None
     job_q = Queue(maxsize=8)
     res_q = Queue()
+    
+    # Shared state for result collector thread
+    collector_state = {
+        'all_xyz': [],
+        'all_rgb': [],
+        'all_err': [],
+        'pairs_processed': 0,
+        'stop': False,
+        'lock': threading.Lock(),
+    }
+    
+    # Prepare intermediate PLY path if sequential viz is enabled
+    viz_interval = config.viz_interval
+    intermediate_ply_base = None
+    if on_sequential_viz and viz_interval > 0:
+        output_dir = os.path.dirname(config.output_path)
+        output_base = os.path.basename(config.output_path)
+        base_no_ext = os.path.splitext(output_base)[0]
+        os.makedirs(output_dir, exist_ok=True)
+        intermediate_ply_base = os.path.join(output_dir, f"{base_no_ext}_intermediate")
+    
+    def result_collector():
+        """Collect results from CPU worker and trigger visualization concurrently."""
+        state = collector_state
+        while True:
+            try:
+                # Use blocking get with timeout so we can check stop flag
+                xyz, rgb, err = res_q.get(timeout=0.1)
+            except Exception:
+                # Check if we should stop
+                with state['lock']:
+                    if state['stop']:
+                        break
+                continue
+            
+            if xyz is None:
+                continue
+            
+            with state['lock']:
+                state['all_xyz'].append(xyz)
+                state['all_rgb'].append(rgb)
+                state['all_err'].append(err)
+                state['pairs_processed'] += 1
+                pairs_count = state['pairs_processed']
+                current_xyz = list(state['all_xyz'])
+                current_rgb = list(state['all_rgb'])
+            
+            # Trigger visualization every viz_interval pairs
+            if on_sequential_viz and viz_interval > 0 and pairs_count % viz_interval == 0 and current_xyz:
+                try:
+                    # Concatenate results so far
+                    xyz_so_far = np.concatenate(current_xyz, axis=0)
+                    rgb_so_far = np.concatenate(current_rgb, axis=0)
+                    
+                    # Write intermediate PLY
+                    intermediate_ply_path = f"{intermediate_ply_base}_{pairs_count}.ply"
+                    write_ply(intermediate_ply_path, xyz_so_far, to_uint8_rgb(rgb_so_far))
+                    lf.log.debug(f"Live update: {xyz_so_far.shape[0]:,} points ({pairs_count} refs processed)")
+                    
+                    # Trigger visualization callback
+                    on_sequential_viz(intermediate_ply_path)
+                except Exception as e:
+                    lf.log.warn(f"Failed to write intermediate PLY: {e}")
     
     try:
         # Initialize RoMa v2 matcher
         device = "cuda" if torch.cuda.is_available() else "cpu"
         matcher = RomaMatcher(device=device, mode="outdoor", setting=config.roma_setting)
-        log(f"RoMaV2: setting={config.roma_setting} on {device}")
+        lf.log.info(f"RoMaV2: setting={config.roma_setting} on {device}")
         
         if torch.cuda.is_available():
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
             torch.backends.cudnn.benchmark = True
-            log("Enabled CUDA optimizations: TF32, cuDNN benchmark")
         
         # Start CPU worker
         worker_fn = make_cpu_worker(
@@ -1070,6 +1136,10 @@ def dense_init_from_lfs(
         )
         worker_thread = threading.Thread(target=worker_fn, daemon=True)
         worker_thread.start()
+        
+        # Start result collector thread for concurrent visualization
+        collector_thread = threading.Thread(target=result_collector, daemon=True)
+        collector_thread.start()
         
         # Producer loop
         jobs_enqueued = 0
@@ -1089,7 +1159,7 @@ def dense_init_from_lfs(
             try:
                 imA = load_rgb_resized(ref_path, (w_match, h_match))
             except Exception as e:
-                log(f"Warning: failed to load reference {ref_path}: {e}")
+                lf.log.warn(f"Failed to load reference {ref_path}: {e}")
                 continue
             
             imA_np = np.asarray(imA, dtype=np.uint8)
@@ -1113,7 +1183,7 @@ def dense_init_from_lfs(
                     imB = load_rgb_resized(img_path, (w_match, h_match))
                     return imB, nn_local, nbr_id
                 except Exception as e:
-                    log(f"Warning: failed to load neighbor: {e}")
+                    lf.log.warn(f"Failed to load neighbor: {e}")
                     return None, None, None
             
             nn_images = []
@@ -1168,7 +1238,6 @@ def dense_init_from_lfs(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
-        log("RoMaV2 model unloaded and GPU memory cleared.")
     
     # Signal worker to finish
     if progress_callback:
@@ -1179,20 +1248,29 @@ def dense_init_from_lfs(
     if worker_thread:
         worker_thread.join(timeout=1.0)
     
-    # Collect results
-    all_xyz, all_rgb, all_err = [], [], []
-    results_collected = 0
-    while results_collected < jobs_enqueued:
+    # Signal collector to stop and wait for it
+    with collector_state['lock']:
+        collector_state['stop'] = True
+    if collector_thread:
+        collector_thread.join(timeout=1.0)
+    
+    # Drain any remaining results from the queue
+    while True:
         try:
             xyz, rgb, err = res_q.get_nowait()
+            if xyz is not None:
+                with collector_state['lock']:
+                    collector_state['all_xyz'].append(xyz)
+                    collector_state['all_rgb'].append(rgb)
+                    collector_state['all_err'].append(err)
         except Exception:
             break
-        results_collected += 1
-        if xyz is None:
-            continue
-        all_xyz.append(xyz)
-        all_rgb.append(rgb)
-        all_err.append(err)
+    
+    # Get final results from collector state
+    with collector_state['lock']:
+        all_xyz = collector_state['all_xyz']
+        all_rgb = collector_state['all_rgb']
+        all_err = collector_state['all_err']
     
     if not all_xyz:
         return 1, "No points triangulated. Try adjusting parameters."
@@ -1200,13 +1278,13 @@ def dense_init_from_lfs(
     xyz = np.concatenate(all_xyz, axis=0)
     rgb = np.concatenate(all_rgb, axis=0)
     err = np.concatenate(all_err, axis=0)
-    log(f"Triangulated points: {xyz.shape[0]} in {time.time()-t0:.1f}s")
+    lf.log.info(f"Triangulated points: {xyz.shape[0]} in {time.time()-t0:.1f}s")
     
     # Optional cap
     if config.max_points > 0 and xyz.shape[0] > config.max_points:
         sel = np.random.default_rng(config.seed).choice(xyz.shape[0], size=config.max_points, replace=False)
         xyz, rgb, err = xyz[sel], rgb[sel], err[sel]
-        log(f"Capped to {xyz.shape[0]} points (max_points).")
+        lf.log.info(f"Capped to {xyz.shape[0]} points (max_points).")
     
     if progress_callback:
         progress_callback(95.0, "Writing output PLY...")
@@ -1215,7 +1293,7 @@ def dense_init_from_lfs(
     output_path = config.output_path
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     write_ply(output_path, xyz, to_uint8_rgb(rgb))
-    log(f"Wrote dense point cloud to {output_path}")
+    lf.log.info(f"Wrote dense point cloud to {output_path}")
     
     if progress_callback:
         progress_callback(100.0, f"Done! {xyz.shape[0]:,} points")

@@ -47,6 +47,7 @@ class DensifyConfig:
     max_points: int = 0
     no_filter: bool = False
     seed: int = 0
+    viz_interval: int = 10  # Visualize every N pairs (0 = only at end)
 
 
 @dataclass
@@ -73,11 +74,13 @@ class DensifyJob:
         on_progress: Optional[Callable[[str, float, str], None]] = None,
         on_complete: Optional[Callable[[DensifyResult], None]] = None,
         on_error: Optional[Callable[[Exception], None]] = None,
+        on_sequential_viz: Optional[Callable[[str], None]] = None,
     ):
         self.config = config
         self.on_progress = on_progress
         self.on_complete = on_complete
         self.on_error = on_error
+        self.on_sequential_viz = on_sequential_viz
 
         self._stage = DensifyStage.IDLE
         self._progress = 0.0
@@ -182,6 +185,7 @@ class DensifyJob:
                 max_points=self.config.max_points,
                 no_filter=self.config.no_filter,
                 seed=self.config.seed,
+                viz_interval=self.config.viz_interval,
             )
 
             def progress_cb(pct: float, msg: str):
@@ -198,7 +202,8 @@ class DensifyJob:
 
             # Run the dense initialization
             result_code, result_info = dense_init_from_lfs(
-                camera_nodes, lfs_config, progress_callback=progress_cb
+                camera_nodes, lfs_config, progress_callback=progress_cb, 
+                on_sequential_viz=self.on_sequential_viz
             )
 
             if result_code != 0:
@@ -284,6 +289,7 @@ class DensificationPanel(Panel):
         self.min_parallax_deg = 0.5
         self.max_points = 0
         self.no_filter = False
+        self.viz_interval = 10  # Visualize every N pairs (0 = only at end)
 
     def _get_temp_output_path(self) -> str:
         """Generate a temporary path for the output PLY file."""
@@ -387,6 +393,14 @@ class DensificationPanel(Panel):
             
             _, self.no_filter = layout.checkbox("Disable Filtering", self.no_filter)
 
+            layout.separator()
+            layout.label("Live Preview:")
+            
+            _, self.viz_interval = layout.drag_int(
+                "Update Every N Pairs", self.viz_interval, 1, 0, 100
+            )
+            layout.label("(0 = only show final result)")
+
         layout.separator()
 
         # Auto-import option
@@ -448,14 +462,21 @@ class DensificationPanel(Panel):
             min_parallax_deg=self.min_parallax_deg,
             max_points=self.max_points,
             no_filter=self.no_filter,
+            viz_interval=self.viz_interval,
         )
 
         self.job = DensifyJob(
             config=config,
             on_complete=self._on_complete,
             on_error=self._on_error,
+            on_sequential_viz=self._on_sequential_viz,
         )
         self.job.start()
+
+    def _on_sequential_viz(self, ply_path: str):
+        """Handle periodic visualization of intermediate PLY files during processing."""
+        # Schedule the import to happen on the main thread
+        self._pending_import = ply_path
 
     def _on_complete(self, result: DensifyResult):
         lf.log.info(f"Densification complete: {result.num_points:,} points")
@@ -510,7 +531,7 @@ class DensificationPanel(Panel):
             # Replace data in-place
             pc.set_data(means, colors)
 
-            lf.log.info(
+            lf.log.debug(
                 f"Replaced '{target.name}' with dense cloud "
                 f"({means.shape[0]:,} points)"
             )
