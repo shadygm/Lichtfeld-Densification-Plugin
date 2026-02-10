@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Optional
 
 import numpy as np
 
@@ -18,6 +18,7 @@ class CameraRecord:
     t: np.ndarray
     P: np.ndarray
     C: np.ndarray
+    mask_path: Optional[str] = None
 
     def flat_pose(self) -> np.ndarray:
         """Return flattened 4x4 pose for clustering/nearest neighbors."""

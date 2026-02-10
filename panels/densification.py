@@ -10,12 +10,14 @@ simply load your scene, adjust parameters if desired, and click Start.
 import os
 import tempfile
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Callable, Optional, List
 
 import lichtfeld as lf
 from lfs_plugins.types import Panel
+
+from ..core.config import DensePipelineConfig
 
 
 class DensifyStage(Enum):
@@ -29,25 +31,6 @@ class DensifyStage(Enum):
     DONE = "done"
     ERROR = "error"
     CANCELLED = "cancelled"
-
-
-@dataclass
-class DensifyConfig:
-    """Configuration for dense initialization pipeline."""
-
-    output_path: str  # Path for output PLY file
-    roma_setting: str = "fast"
-    num_refs: float = 0.75
-    nns_per_ref: int = 4
-    matches_per_ref: int = 12000
-    certainty_thresh: float = 0.20
-    reproj_thresh: float = 1.5
-    sampson_thresh: float = 5.0
-    min_parallax_deg: float = 0.5
-    max_points: int = 0
-    no_filter: bool = False
-    seed: int = 0
-    viz_interval: int = 10  # Visualize every N pairs (0 = only at end)
 
 
 @dataclass
@@ -70,7 +53,7 @@ class DensifyJob:
 
     def __init__(
         self,
-        config: DensifyConfig,
+        config: DensePipelineConfig,
         on_progress: Optional[Callable[[str, float, str], None]] = None,
         on_complete: Optional[Callable[[DensifyResult], None]] = None,
         on_error: Optional[Callable[[Exception], None]] = None,
@@ -170,23 +153,7 @@ class DensifyJob:
                 return
 
             # Import and run the LFS-based densify pipeline
-            from ..densify import dense_init_from_lfs, LFSDenseConfig
-
-            lfs_config = LFSDenseConfig(
-                output_path=self.config.output_path,
-                roma_setting=self.config.roma_setting,
-                num_refs=self.config.num_refs,
-                nns_per_ref=self.config.nns_per_ref,
-                matches_per_ref=self.config.matches_per_ref,
-                certainty_thresh=self.config.certainty_thresh,
-                reproj_thresh=self.config.reproj_thresh,
-                sampson_thresh=self.config.sampson_thresh,
-                min_parallax_deg=self.config.min_parallax_deg,
-                max_points=self.config.max_points,
-                no_filter=self.config.no_filter,
-                seed=self.config.seed,
-                viz_interval=self.config.viz_interval,
-            )
+            from ..densify import dense_init_from_lfs
 
             def progress_cb(pct: float, msg: str):
                 if check_cancelled():
@@ -202,7 +169,7 @@ class DensifyJob:
 
             # Run the dense initialization
             result_code, result_info = dense_init_from_lfs(
-                camera_nodes, lfs_config, progress_callback=progress_cb, 
+                camera_nodes, self.config, progress_callback=progress_cb,
                 on_sequential_viz=self.on_sequential_viz
             )
 
@@ -260,7 +227,7 @@ class DensificationPanel(Panel):
 
     label = "Dense Initialization"
     space = "MAIN_PANEL_TAB"
-    order = 5
+    order = 21
 
     def __init__(self):
         self.job = None
@@ -268,7 +235,10 @@ class DensificationPanel(Panel):
         self._pending_import = None
         self._auto_import = True  # Auto-import result after completion
 
+        self.config = DensePipelineConfig(output_path=self._get_temp_output_path())
+
         # Quality settings
+        # Keep a UI index for the quality dropdown; the actual value is stored in self.config.roma_setting.
         self.roma_setting_idx = 3  # "fast" is default
         self.roma_settings = ["precise", "high", "base", "fast", "turbo"]
         self.roma_descriptions = [
@@ -278,18 +248,6 @@ class DensificationPanel(Panel):
             "Fast: Good quality, fast (512px) - Recommended",
             "Turbo: Fastest, lower quality (320px)",
         ]
-
-        # Advanced settings with reasonable defaults
-        self.num_refs = 0.75
-        self.nns_per_ref = 4
-        self.matches_per_ref = 12000
-        self.certainty_thresh = 0.20
-        self.reproj_thresh = 1.5
-        self.sampson_thresh = 5.0
-        self.min_parallax_deg = 0.5
-        self.max_points = 0
-        self.no_filter = False
-        self.viz_interval = 10  # Visualize every N pairs (0 = only at end)
 
     def _get_temp_output_path(self) -> str:
         """Generate a temporary path for the output PLY file."""
@@ -342,63 +300,44 @@ class DensificationPanel(Panel):
 
         # Quality settings
         if layout.collapsing_header("Quality Settings", default_open=True):
-            _, self.roma_setting_idx = layout.combo(
-                "Matching Quality", self.roma_setting_idx, self.roma_settings
-            )
+            _, self.roma_setting_idx = layout.combo("Matching Quality", self.roma_setting_idx, self.roma_settings)
+            self.config.roma_setting = self.roma_settings[self.roma_setting_idx]
             layout.label(self.roma_descriptions[self.roma_setting_idx])
 
         # Advanced settings
         if layout.collapsing_header("Advanced Settings", default_open=False):
             layout.label("Reference View Selection:")
-            _, self.num_refs = layout.drag_float(
-                "Reference Fraction", self.num_refs, 0.01, 0.1, 1.0
-            )
+            _, self.config.num_refs = layout.drag_float("Reference Fraction", self.config.num_refs, 0.01, 0.1, 1.0)
             
-            _, self.nns_per_ref = layout.drag_int(
-                "Neighbors per Ref", self.nns_per_ref, 1, 1, 10
-            )
+            _, self.config.nns_per_ref = layout.drag_int("Neighbors per Ref", self.config.nns_per_ref, 1, 1, 10)
 
             layout.separator()
             layout.label("Matching Parameters:")
             
-            _, self.matches_per_ref = layout.drag_int(
-                "Matches per Ref", self.matches_per_ref, 100, 1000, 50000
-            )
+            _, self.config.matches_per_ref = layout.drag_int("Matches per Ref", self.config.matches_per_ref, 100, 1000, 50000)
             
-            _, self.certainty_thresh = layout.drag_float(
-                "Min Certainty", self.certainty_thresh, 0.01, 0.0, 1.0
-            )
+            _, self.config.certainty_thresh = layout.drag_float("Min Certainty", self.config.certainty_thresh, 0.01, 0.0, 1.0)
 
             layout.separator()
             layout.label("Geometric Filtering:")
             
-            _, self.reproj_thresh = layout.drag_float(
-                "Max Reproj Error (px)", self.reproj_thresh, 0.1, 0.1, 10.0
-            )
+            _, self.config.reproj_thresh = layout.drag_float("Max Reproj Error (px)", self.config.reproj_thresh, 0.1, 0.1, 10.0)
             
-            _, self.sampson_thresh = layout.drag_float(
-                "Max Sampson Error", self.sampson_thresh, 0.5, 0.0, 50.0
-            )
+            _, self.config.sampson_thresh = layout.drag_float("Max Sampson Error", self.config.sampson_thresh, 0.5, 0.0, 50.0)
             
-            _, self.min_parallax_deg = layout.drag_float(
-                "Min Parallax (deg)", self.min_parallax_deg, 0.1, 0.0, 10.0
-            )
+            _, self.config.min_parallax_deg = layout.drag_float("Min Parallax (deg)", self.config.min_parallax_deg, 0.1, 0.0, 10.0)
 
             layout.separator()
             layout.label("Output Options:")
             
-            _, self.max_points = layout.drag_int(
-                "Max Points (0=unlimited)", self.max_points, 1000, 0, 10000000
-            )
+            _, self.config.max_points = layout.drag_int("Max Points (0=unlimited)", self.config.max_points, 1000, 0, 10000000)
             
-            _, self.no_filter = layout.checkbox("Disable Filtering", self.no_filter)
+            _, self.config.no_filter = layout.checkbox("Disable Filtering", self.config.no_filter)
 
             layout.separator()
             layout.label("Live Preview:")
             
-            _, self.viz_interval = layout.drag_int(
-                "Update Every N Pairs", self.viz_interval, 1, 0, 100
-            )
+            _, self.config.viz_interval = layout.drag_int("Update Every N Pairs", self.config.viz_interval, 1, 0, 100)
             layout.label("(0 = only show final result)")
 
         layout.separator()
@@ -450,19 +389,12 @@ class DensificationPanel(Panel):
 
         self.last_result = None
 
-        config = DensifyConfig(
+        # Snapshot the current config for the background job.
+        # (Avoids mutations from the UI while the job is running.)
+        config = replace(
+            self.config,
             output_path=self._get_temp_output_path(),
             roma_setting=self.roma_settings[self.roma_setting_idx],
-            num_refs=self.num_refs,
-            nns_per_ref=self.nns_per_ref,
-            matches_per_ref=self.matches_per_ref,
-            certainty_thresh=self.certainty_thresh,
-            reproj_thresh=self.reproj_thresh,
-            sampson_thresh=self.sampson_thresh,
-            min_parallax_deg=self.min_parallax_deg,
-            max_points=self.max_points,
-            no_filter=self.no_filter,
-            viz_interval=self.viz_interval,
         )
 
         self.job = DensifyJob(

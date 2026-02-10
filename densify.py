@@ -50,6 +50,7 @@ def _build_camera_records_from_colmap(
             CameraRecord(
                 uid=iid,
                 image_path=img_path,
+                mask_path=None,
                 width=cam.width,
                 height=cam.height,
                 K=K,
@@ -150,11 +151,6 @@ def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] =
     if progress_callback:
         progress_callback(100.0, f"Done! {xyz.shape[0]:,} points")
     return 0
-
-
-LFSDenseConfig = DensePipelineConfig
-
-
 def extract_cameras_from_lfs(camera_nodes) -> List[CameraRecord]:
     records: List[CameraRecord] = []
     for node in camera_nodes:
@@ -175,6 +171,7 @@ def extract_cameras_from_lfs(camera_nodes) -> List[CameraRecord]:
             CameraRecord(
                 uid=node.camera_uid,
                 image_path=node.image_path,
+                mask_path=(node.mask_path if getattr(node, "has_mask", False) else None),
                 width=width,
                 height=height,
                 K=K,

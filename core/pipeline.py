@@ -12,6 +12,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import lichtfeld as lf
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 
 from .camera_models import CameraRecord
@@ -24,7 +25,7 @@ from .geometry import (
     reprojection_errors,
     sampson_error,
 )
-from .image_utils import load_rgb_resized, to_uint8_rgb
+from .image_utils import apply_mask_to_rgb, load_mask_resized_np, load_rgb_resized, to_uint8_rgb
 from .matcher import RomaMatcher
 from .sampling import select_samples_with_coverage
 from .writers import write_ply
@@ -270,6 +271,7 @@ def run_dense_pipeline(
 
     img_ids = [cam.uid for cam in camera_records]
     path_by = {cam.uid: cam.image_path for cam in camera_records}
+    mask_by = {cam.uid: getattr(cam, "mask_path", None) for cam in camera_records}
     size_by = {cam.uid: (cam.width, cam.height) for cam in camera_records}
     K_by = {cam.uid: cam.K for cam in camera_records}
     R_by = {cam.uid: cam.R for cam in camera_records}
@@ -349,6 +351,17 @@ def run_dense_pipeline(
                 lf.log.warn(f"Failed to load reference {ref_path}: {exc}")
                 continue
 
+            # If a mask is available, restrict matching to masked-in pixels.
+            maskA_np = None
+            ref_mask_path = mask_by.get(ref_id)
+            if ref_mask_path:
+                try:
+                    maskA_np = load_mask_resized_np(ref_mask_path, (w_match, h_match))
+                    imA = apply_mask_to_rgb(imA, maskA_np)
+                except Exception as exc:
+                    lf.log.warn(f"Failed to load/apply mask for reference {ref_id}: {exc}")
+                    maskA_np = None
+
             imA_np = np.asarray(imA, dtype=np.uint8)
             wA_cam, hA_cam = size_by[ref_id]
             local_nns = nn_table[ref_local][: config.nns_per_ref]
@@ -358,34 +371,74 @@ def run_dense_pipeline(
             warp_list_cpu: List[torch.Tensor] = []
             cert_list_cpu: List[torch.Tensor] = []
             nn_ids: List[int] = []
+            nn_masks: List[Optional[np.ndarray]] = []
 
-            def load_neighbor(nn_local: int) -> Tuple[Optional[Image.Image], Optional[int], Optional[int]]:
+            def load_neighbor(nn_local: int) -> Tuple[Optional[Image.Image], Optional[np.ndarray], Optional[int], Optional[int]]:
                 nbr_id = img_ids[nn_local]
                 if nbr_id == ref_id:
-                    return None, None, None
+                    return None, None, None, None
                 try:
                     img_path = path_by[nbr_id]
                     imB = load_rgb_resized(img_path, (w_match, h_match))
-                    return imB, nn_local, nbr_id
+
+                    maskB_np = None
+                    nbr_mask_path = mask_by.get(nbr_id)
+                    if nbr_mask_path:
+                        try:
+                            maskB_np = load_mask_resized_np(nbr_mask_path, (w_match, h_match))
+                            imB = apply_mask_to_rgb(imB, maskB_np)
+                        except Exception as exc:
+                            lf.log.warn(f"Failed to load/apply mask for neighbor {nbr_id}: {exc}")
+                            maskB_np = None
+
+                    return imB, maskB_np, nn_local, nbr_id
                 except Exception as exc:
                     lf.log.warn(f"Failed to load neighbor: {exc}")
-                    return None, None, None
+                    return None, None, None, None
 
             with ThreadPoolExecutor(max_workers=4) as executor:
                 load_results = list(executor.map(load_neighbor, local_nns))
 
             nn_images = []
-            for imB, nn_local, nbr_id in load_results:
+            for imB, maskB_np, nn_local, nbr_id in load_results:
                 if imB is not None and nn_local is not None and nbr_id is not None:
                     nn_images.append(imB)
                     nn_ids.append(nbr_id)
+                    nn_masks.append(maskB_np)
 
             if not nn_images:
                 continue
 
             batch_results = matcher.match_grids_batch(imA, nn_images)
-            for warp_hw, cert_hw in batch_results:
+            # Precompute reference mask tensor on the match device (if present).
+            maskA_t = None
+            if maskA_np is not None:
+                maskA_t = torch.from_numpy(maskA_np.astype(np.float32))
+
+            for (warp_hw, cert_hw), maskB_np in zip(batch_results, nn_masks):
                 cert_hw = torch.clamp(cert_hw, min=config.certainty_thresh)
+
+                # Apply reference mask (A): cert becomes 0 outside mask.
+                if maskA_t is not None:
+                    cert_hw = cert_hw * maskA_t.to(device=cert_hw.device, dtype=cert_hw.dtype)
+
+                # Apply neighbor mask (B): cert becomes 0 if warp lands outside B's mask.
+                if maskB_np is not None:
+                    maskB_t = (
+                        torch.from_numpy(maskB_np.astype(np.float32))
+                        .to(device=cert_hw.device, dtype=cert_hw.dtype)
+                        .view(1, 1, cert_hw.shape[0], cert_hw.shape[1])
+                    )
+                    gridB = warp_hw[..., 2:4].unsqueeze(0)
+                    maskB_warp = F.grid_sample(
+                        maskB_t,
+                        gridB,
+                        mode="nearest",
+                        padding_mode="zeros",
+                        align_corners=False,
+                    )
+                    cert_hw = cert_hw * maskB_warp.squeeze(0).squeeze(0)
+
                 warp_cpu = warp_hw.detach().to("cpu", non_blocking=True)
                 cert_cpu = cert_hw.detach().to("cpu", non_blocking=True)
                 warp_list_cpu.append(warp_cpu)

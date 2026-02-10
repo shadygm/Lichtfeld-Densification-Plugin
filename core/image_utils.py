@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 from PIL import Image
@@ -35,6 +35,51 @@ def find_image(root: str, name: str) -> str:
     if os.path.isfile(fallback):
         return fallback
     raise FileNotFoundError(f"Image '{name}' not found under {root}")
+
+
+@lru_cache(maxsize=4096)
+def load_mask_resized_np(
+    path: str,
+    size: Tuple[int, int],
+    *,
+    invert: bool = False,
+    threshold: float = 0.5,
+) -> np.ndarray:
+    """Load a binary mask (uint8 {0,1}) and resize to the requested size.
+
+    Mask convention: 1 = "interesting / keep", 0 = ignore.
+    """
+    if not os.path.isfile(path):
+        raise FileNotFoundError(path)
+
+    im = Image.open(path)
+    # Convert to single channel; handles RGB/RGBA masks gracefully.
+    im = im.convert("L")
+    if im.size != size:
+        # Nearest preserves hard mask edges.
+        im = im.resize(size, Image.NEAREST)
+    arr = np.asarray(im, dtype=np.uint8)
+    # Normalize into boolean using threshold in [0,1].
+    keep = (arr.astype(np.float32) / 255.0) > float(threshold)
+    if invert:
+        keep = ~keep
+    return keep.astype(np.uint8)
+
+
+def apply_mask_to_rgb(im: Image.Image, mask01: np.ndarray) -> Image.Image:
+    """Apply a {0,1} mask to an RGB PIL image (masked pixels become black)."""
+    if im.mode != "RGB":
+        im = im.convert("RGB")
+    rgb = np.asarray(im, dtype=np.uint8)
+    if mask01.ndim != 2:
+        raise ValueError(f"mask01 must be HxW, got shape={mask01.shape}")
+    if rgb.shape[0] != mask01.shape[0] or rgb.shape[1] != mask01.shape[1]:
+        raise ValueError(
+            f"mask01 shape {mask01.shape} must match image shape {(rgb.shape[0], rgb.shape[1])}"
+        )
+    rgb = rgb.copy()
+    rgb[mask01 == 0] = 0
+    return Image.fromarray(rgb, mode="RGB")
 
 
 @lru_cache(maxsize=4096)
