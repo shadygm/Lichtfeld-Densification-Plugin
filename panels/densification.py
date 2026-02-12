@@ -8,16 +8,23 @@ simply load your scene, adjust parameters if desired, and click Start.
 """
 
 import os
+import random
 import tempfile
 import threading
+import time
+import zlib
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Callable, Optional, List
+
+import numpy as np
+from PIL import Image
 
 import lichtfeld as lf
 from lfs_plugins.types import Panel
 
 from ..core.config import DensePipelineConfig
+from ..core.debug_viz import MatchDebugState, MatchPreview
 
 
 class DensifyStage(Enum):
@@ -58,12 +65,14 @@ class DensifyJob:
         on_complete: Optional[Callable[[DensifyResult], None]] = None,
         on_error: Optional[Callable[[Exception], None]] = None,
         on_sequential_viz: Optional[Callable[[str], None]] = None,
+        debug_state: Optional[MatchDebugState] = None,
     ):
         self.config = config
         self.on_progress = on_progress
         self.on_complete = on_complete
         self.on_error = on_error
         self.on_sequential_viz = on_sequential_viz
+        self.debug_state = debug_state
 
         self._stage = DensifyStage.IDLE
         self._progress = 0.0
@@ -104,6 +113,8 @@ class DensifyJob:
     def cancel(self):
         with self._lock:
             self._cancelled = True
+            if self.debug_state:
+                self.debug_state.release_waiters()
 
     def start(self):
         if self._thread is not None:
@@ -169,8 +180,11 @@ class DensifyJob:
 
             # Run the dense initialization
             result_code, result_info = dense_init_from_lfs(
-                camera_nodes, self.config, progress_callback=progress_cb,
-                on_sequential_viz=self.on_sequential_viz
+                camera_nodes,
+                self.config,
+                progress_callback=progress_cb,
+                on_sequential_viz=self.on_sequential_viz,
+                debug_state=self.debug_state,
             )
 
             if result_code != 0:
@@ -216,6 +230,10 @@ class DensifyJob:
             if self.on_error:
                 self.on_error(e)
 
+        finally:
+            if self.debug_state:
+                self.debug_state.release_waiters()
+
 
 class DensificationPanel(Panel):
     """GUI panel for dense point cloud initialization workflow.
@@ -234,6 +252,11 @@ class DensificationPanel(Panel):
         self.last_result = None
         self._pending_import = None
         self._auto_import = True  # Auto-import result after completion
+
+        self.debug_state = MatchDebugState()
+
+        self.debug_enabled = False
+        self.debug_auto_step = True
 
         self.config = DensePipelineConfig(output_path=self._get_temp_output_path())
 
@@ -340,6 +363,25 @@ class DensificationPanel(Panel):
             _, self.config.viz_interval = layout.drag_int("Update Every N Pairs", self.config.viz_interval, 1, 0, 100)
             layout.label("(0 = only show final result)")
 
+            layout.separator()
+            layout.label("Debugging:")
+            changed_debug, self.debug_enabled = layout.checkbox("Debug matches (floating window)", self.debug_enabled)
+            if changed_debug:
+                self.debug_state.set_enabled(self.debug_enabled)
+                if not self.debug_enabled:
+                    # Ensure the pipeline is unblocked
+                    self.debug_state.set_auto_step(True)
+                    self.debug_state.release_waiters()
+
+            changed_auto, self.debug_auto_step = layout.checkbox("Auto-step", self.debug_auto_step)
+            if changed_auto:
+                self.debug_state.set_auto_step(self.debug_auto_step)
+                if self.debug_auto_step:
+                    self.debug_state.release_waiters()
+
+            if not self.debug_auto_step:
+                layout.text_disabled("Manual stepping: use 'Next pair' in the debug window.")
+
         layout.separator()
 
         # Auto-import option
@@ -378,6 +420,171 @@ class DensificationPanel(Panel):
             layout.text_colored("Error:", (1.0, 0.3, 0.3, 1.0))
             layout.text_selectable(self.last_result.error or "Unknown error", 60)
 
+        # Floating debug window (if enabled)
+        self._draw_debug_window(layout)
+
+    def _draw_debug_window(self, layout):
+        if not self.debug_state.is_enabled():
+            return
+
+        layout.set_next_window_size((960, 560), first_use=True)
+        visible, still_open = layout.begin_window_closable("Dense Match Debug", flags=0)
+        try:
+            if not visible:
+                if not still_open:
+                    self.debug_enabled = False
+                    self.debug_state.set_enabled(False)
+                return
+
+            layout.label("Live match previews")
+            changed_auto, auto_val = layout.checkbox("Auto-step", self.debug_state.is_auto_step())
+            if changed_auto:
+                self.debug_auto_step = auto_val
+                self.debug_state.set_auto_step(auto_val)
+                if auto_val:
+                    self.debug_state.release_waiters()
+
+            if not self.debug_state.is_auto_step():
+                if layout.button("Next pair", (120, 0)):
+                    self.debug_state.step_once()
+
+            layout.separator()
+
+            # --- Match visibility controls ---
+            cur_max = self.debug_state.max_visible_matches()
+            _, new_max = layout.drag_int("Visible matches (0=all)", cur_max, 1, 0, 5000)
+            if new_max != cur_max:
+                self.debug_state.set_max_visible_matches(new_max)
+
+            single = self.debug_state.is_single_match_mode()
+            changed_single, single_val = layout.checkbox("Single match mode", single)
+            if changed_single:
+                self.debug_state.set_single_match_mode(single_val)
+
+            preview = self.debug_state.latest()
+
+            if single_val and preview is not None:
+                total_m = preview.matches.shape[0] if preview.matches is not None else 0
+                cur_idx = self.debug_state.current_match_index()
+                layout.label(f"Match {min(cur_idx + 1, total_m)}/{total_m}")
+                with layout.row() as row:
+                    if row.button("<< Prev", (80, 0)):
+                        self.debug_state.prev_match(total_m)
+                    if row.button("Next >>", (80, 0)):
+                        self.debug_state.next_match(total_m)
+                _, idx_val = layout.drag_int("Match index", cur_idx, 1, 0, max(0, total_m - 1))
+                if idx_val != cur_idx:
+                    self.debug_state.set_current_match_index(idx_val)
+
+            layout.separator()
+            total_pairs = max(self.debug_state.total_pairs(), 1)
+            if preview:
+                layout.label(f"Pair {preview.pair_index}/{preview.total_pairs or total_pairs}")
+                layout.label(f"{preview.ref_label} ↔ {preview.nbr_label}")
+                layout.label(f"Total matches: {preview.match_count}")
+                self._draw_match_preview(layout, preview, pair_index=int(preview.pair_index))
+            else:
+                layout.text_disabled("Waiting for matches...")
+        finally:
+            layout.end_window()
+
+    _DEBUG_PREVIEW_DRAW_SIZE = (512, 512)
+    _DEBUG_PREVIEW_LINE_THICKNESS = 0.1
+
+    def _draw_match_preview(self, layout, preview: MatchPreview, *, pair_index: int):
+        left = preview.left_image
+        right = preview.right_image
+        matches = preview.matches
+
+        if (
+            left is None
+            or right is None
+            or matches is None
+            or left.size == 0
+            or right.size == 0
+            or len(matches) == 0
+        ):
+            layout.text_disabled("No preview available")
+            return
+
+        disp_w, disp_h = self._DEBUG_PREVIEW_DRAW_SIZE
+
+        # Prepare images for display
+        img_left = np.asarray(
+            Image.fromarray(left).resize((disp_w, disp_h), Image.BILINEAR),
+            dtype=np.float32,
+        ) / 255.0
+        img_right = np.asarray(
+            Image.fromarray(right).resize((disp_w, disp_h), Image.BILINEAR),
+            dtype=np.float32,
+        ) / 255.0
+
+        tensor_left = lf.Tensor.from_numpy(img_left)
+        tensor_right = lf.Tensor.from_numpy(img_right)
+
+        # Source (match) resolution
+        src_h, src_w = left.shape[:2]
+        sx = disp_w / float(max(1, src_w))
+        sy = disp_h / float(max(1, src_h))
+
+        layout.new_line()
+        # Draw images and capture exact anchors
+        base_x, base_y = layout.get_cursor_screen_pos()
+
+        left_anchor = None
+        right_anchor = None
+        with layout.row() as row:
+            try:
+                left_anchor = row.get_cursor_screen_pos()
+            except Exception:
+                left_anchor = None
+
+            row.image_tensor("left", tensor_left, (disp_w, disp_h))
+
+            # Cursor now points to where the NEXT widget will go (i.e., the right image start)
+            try:
+                right_anchor = row.get_cursor_screen_pos()
+            except Exception:
+                right_anchor = None
+
+            row.image_tensor("right", tensor_right, (disp_w, disp_h))
+
+        left_x, left_y = left_anchor if left_anchor is not None else (base_x, base_y)
+        if right_anchor is not None:
+            right_x, right_y = right_anchor
+        else:
+            # Fallback if SubLayout doesn't expose get_cursor_screen_pos
+            right_x, right_y = base_x + disp_w, base_y
+
+        # Draw lines. IMPORTANT: matches are already pixel coords in MATCH resolution.
+        thickness = float(self._DEBUG_PREVIEW_LINE_THICKNESS)
+        total_matches = int(matches.shape[0])
+        visible_indices = self.debug_state.visible_match_indices(total_matches)
+        if not visible_indices:
+            layout.text_disabled("No matches to display")
+            return
+
+        for idx in visible_indices:
+            xa, ya, xb, yb = matches[idx]
+            x1 = left_x + float(xa) * sx
+            y1 = left_y + float(ya) * sy
+            x2 = right_x + float(xb) * sx
+            y2 = right_y + float(yb) * sy
+
+            seed = (int(pair_index) * 1000003) ^ (int(idx) * 9176)
+            rng = random.Random(seed & 0xFFFFFFFF)
+            color = (
+                0.2 + 0.8 * rng.random(),
+                0.2 + 0.8 * rng.random(),
+                0.2 + 0.8 * rng.random(),
+                1.0,
+            )
+            layout.draw_line(x1, y1, x2, y2, color, thickness)
+
+
+
+
+
     def _start(self):
         if not self._has_training_data():
             lf.log.warn("No training cameras found in scene")
@@ -388,6 +595,11 @@ class DensificationPanel(Panel):
             return
 
         self.last_result = None
+
+        # Sync debug controller with current UI settings before launching job
+        self.debug_state.set_enabled(self.debug_enabled)
+        self.debug_state.set_auto_step(self.debug_auto_step)
+        self.debug_state.release_waiters()
 
         # Snapshot the current config for the background job.
         # (Avoids mutations from the UI while the job is running.)
@@ -402,6 +614,7 @@ class DensificationPanel(Panel):
             on_complete=self._on_complete,
             on_error=self._on_error,
             on_sequential_viz=self._on_sequential_viz,
+            debug_state=self.debug_state,
         )
         self.job.start()
 

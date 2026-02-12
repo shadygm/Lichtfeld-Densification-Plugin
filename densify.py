@@ -104,7 +104,11 @@ def _write_output(path: str, xyz: np.ndarray, rgb: np.ndarray, err: np.ndarray) 
         write_points3D_bin(path, xyz, rgb_uint8, err)
 
 
-def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] = None) -> int:
+def dense_init(
+    args,
+    progress_callback: Optional[Callable[[float, str], None]] = None,
+    debug_state=None,
+) -> int:
     np.random.seed(args.seed)
     scene_root = os.path.abspath(args.scene_root)
     sparse_dir = os.path.join(scene_root, "sparse", "0")
@@ -141,6 +145,7 @@ def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] =
         config,
         progress_callback=progress_callback,
         on_sequential_viz=None,
+        debug_state=debug_state,
     )
 
     xyz, rgb, err = _apply_point_cap(result.xyz, result.rgb, result.err, args.max_points, args.seed)
@@ -189,6 +194,7 @@ def dense_init_from_lfs(
     config: DensePipelineConfig,
     progress_callback: Optional[Callable[[float, str], None]] = None,
     on_sequential_viz: Optional[Callable[[str], None]] = None,
+    debug_state=None,
 ) -> Tuple[int, Optional[str]]:
     np.random.seed(config.seed)
     if progress_callback:
@@ -213,6 +219,7 @@ def dense_init_from_lfs(
             config,
             progress_callback=progress_callback,
             on_sequential_viz=on_sequential_viz,
+            debug_state=debug_state,
         )
     except RuntimeError as exc:
         return 1, str(exc)
