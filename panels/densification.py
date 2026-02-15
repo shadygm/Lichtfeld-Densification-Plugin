@@ -469,10 +469,10 @@ class DensificationPanel(Panel):
                 layout.label(f"Match {min(cur_idx + 1, total_m)}/{total_m}")
                 with layout.row() as row:
                     if row.button("<< Prev", (80, 0)):
-                        self.debug_state.prev_match(total_m)
+                        self.debug_state.prev_match(int(total_m))
                     if row.button("Next >>", (80, 0)):
-                        self.debug_state.next_match(total_m)
-                _, idx_val = layout.drag_int("Match index", cur_idx, 1, 0, max(0, total_m - 1))
+                        self.debug_state.next_match(int(total_m))
+                _, idx_val = layout.drag_int("Match index", cur_idx, 1, 0, max(0, int(total_m) - 1))
                 if idx_val != cur_idx:
                     self.debug_state.set_current_match_index(idx_val)
 
@@ -507,6 +507,12 @@ class DensificationPanel(Panel):
             layout.text_disabled("No preview available")
             return
 
+        total_matches = int(matches.shape[0])
+        visible_indices = self.debug_state.visible_match_indices(total_matches)
+        if not visible_indices:
+            layout.text_disabled("No matches selected for drawing")
+            return
+
         disp_w, disp_h = self._DEBUG_PREVIEW_DRAW_SIZE
 
         # Prepare images for display
@@ -522,7 +528,7 @@ class DensificationPanel(Panel):
         tensor_left = lf.Tensor.from_numpy(img_left)
         tensor_right = lf.Tensor.from_numpy(img_right)
 
-        # Source (match) resolution
+        # Source (match) resolution from original images
         src_h, src_w = left.shape[:2]
         sx = disp_w / float(max(1, src_w))
         sy = disp_h / float(max(1, src_h))
@@ -556,30 +562,31 @@ class DensificationPanel(Panel):
             # Fallback if SubLayout doesn't expose get_cursor_screen_pos
             right_x, right_y = base_x + disp_w, base_y
 
-        # Draw lines. IMPORTANT: matches are already pixel coords in MATCH resolution.
+        # Draw lines. Matches are in original image pixel coords.
         thickness = float(self._DEBUG_PREVIEW_LINE_THICKNESS)
-        total_matches = int(matches.shape[0])
-        visible_indices = self.debug_state.visible_match_indices(total_matches)
-        if not visible_indices:
-            layout.text_disabled("No matches to display")
-            return
-
         for idx in visible_indices:
             xa, ya, xb, yb = matches[idx]
+
+            # Convert from original image coordinates to display coordinates
             x1 = left_x + float(xa) * sx
             y1 = left_y + float(ya) * sy
             x2 = right_x + float(xb) * sx
             y2 = right_y + float(yb) * sy
 
-            seed = (int(pair_index) * 1000003) ^ (int(idx) * 9176)
-            rng = random.Random(seed & 0xFFFFFFFF)
-            color = (
-                0.2 + 0.8 * rng.random(),
-                0.2 + 0.8 * rng.random(),
-                0.2 + 0.8 * rng.random(),
-                1.0,
-            )
+            color = self._feature_color(pair_index, int(idx), matches[int(idx)])
             layout.draw_line(x1, y1, x2, y2, color, thickness)
+
+    @staticmethod
+    def _feature_color(pair_index: int, match_index: int, match: np.ndarray):
+        seed = zlib.crc32(np.asarray(match, dtype=np.float32).tobytes(), int(pair_index) & 0xFFFF_FFFF)
+        seed = zlib.crc32(str(int(match_index)).encode("ascii"), seed) & 0xFFFF_FFFF
+        rng = random.Random(seed)
+        return (
+            0.25 + 0.75 * rng.random(),
+            0.25 + 0.75 * rng.random(),
+            0.25 + 0.75 * rng.random(),
+            0.9,
+        )
 
 
 
@@ -683,4 +690,3 @@ class DensificationPanel(Panel):
 
         except Exception as e:
             lf.log.error(f"Failed to import PLY: {e}")
-

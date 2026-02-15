@@ -43,61 +43,42 @@ class PipelineResult:
 _PREVIEW_MAX_MATCHES = 10000
 
 
-def _build_match_preview(
+def _build_filtered_match_preview(
     imA_np: np.ndarray,
     imB_np: np.ndarray,
-    warp_cpu: torch.Tensor,
-    cert_cpu: torch.Tensor,
-    sample_cap: float,
+    matches: np.ndarray,
+    cert_norm: np.ndarray,
     ref_id: int,
     nbr_id: int,
     ref_label: str,
     nbr_label: str,
     pair_index: int,
     total_pairs: int,
+    match_count: int,
     max_matches: int = _PREVIEW_MAX_MATCHES,
 ) -> Optional[MatchPreview]:
-    """Cheap visualization: sample top-certainty correspondences.
+    """Build a debug preview from correspondences that survived filtering.
 
-    No geometric filtering is performed — this is purely for visual debugging.
-    Returns raw match endpoints so the UI can draw overlays (e.g. via
-    ``layout.draw_line``).
+    The ``matches`` input must be in pixel coordinates of the resized match
+    images and must represent correspondences that are used for triangulation.
     """
 
-    if warp_cpu.numel() == 0 or cert_cpu.numel() == 0:
+    if matches is None or cert_norm is None:
+        return None
+    if matches.size == 0 or cert_norm.size == 0:
         return None
 
-    H, W = cert_cpu.shape
-    sel_idx = select_samples_with_coverage(
-        cert_cpu,
-        max_matches,
-        cap=sample_cap,
-        border=2,
-        tiles=12,
-        no_filter=True,
-    )
-    if sel_idx.size == 0:
-        return None
+    matches = np.asarray(matches, dtype=np.float32)
+    cert_norm = np.asarray(cert_norm, dtype=np.float32)
+    total = int(match_count if match_count > 0 else matches.shape[0])
 
-    agg = warp_cpu.reshape(-1, 4)[sel_idx].numpy()
-    # grid coords are in [-1, 1] with align_corners=False
-    xA = (agg[:, 0] + 1.0) * 0.5 * W - 0.5
-    yA = (agg[:, 1] + 1.0) * 0.5 * H - 0.5
-    xB = (agg[:, 2] + 1.0) * 0.5 * W - 0.5
-    yB = (agg[:, 3] + 1.0) * 0.5 * H - 0.5
+    if matches.shape[0] > max_matches > 0:
+        seed = ((int(ref_id) & 0xFFFF_FFFF) * 73856093) ^ ((int(nbr_id) & 0xFFFF_FFFF) * 19349663)
+        rng = np.random.default_rng(seed & 0xFFFF_FFFF)
+        sel_idx = rng.choice(matches.shape[0], size=max_matches, replace=False)
+        matches = matches[sel_idx]
+        cert_norm = cert_norm[sel_idx]
 
-    xA = np.clip(xA, 0.0, W - 1.0)
-    yA = np.clip(yA, 0.0, H - 1.0)
-    xB = np.clip(xB, 0.0, W - 1.0)
-    yB = np.clip(yB, 0.0, H - 1.0)
-
-    # Color by certainty: weak -> red, strong -> green.
-    # Note: select_samples_with_coverage clamps cert to <= sample_cap.
-    cert_sel = cert_cpu.reshape(-1)[sel_idx].detach().to("cpu").numpy()
-    denom = float(sample_cap) if float(sample_cap) > 1e-6 else 1.0
-    cert_norm = np.clip(cert_sel / denom, 0.0, 1.0)
-
-    matches = np.stack([xA, yA, xB, yB], axis=1).astype(np.float32, copy=False)
     return MatchPreview(
         ref_id=ref_id,
         nbr_id=nbr_id,
@@ -107,7 +88,7 @@ def _build_match_preview(
         right_image=imB_np,
         matches=matches,
         cert_norm=cert_norm.astype(np.float32, copy=False),
-        match_count=int(len(sel_idx)),
+        match_count=total,
         pair_index=int(pair_index),
         total_pairs=int(total_pairs),
     )
@@ -131,7 +112,8 @@ def _triangulate_ref(
     size_by: Dict[int, Tuple[int, int]],
     config: DensePipelineConfig,
     matcher_sample_cap: float,
-) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    collect_debug_matches: bool = False,
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[int, np.ndarray], Dict[int, np.ndarray]]]:
     """Triangulate matches for a single reference view. Returns (xyz, rgb, err) or None."""
 
     H, W = cert_list[0].shape
@@ -161,6 +143,7 @@ def _triangulate_ref(
     yA = (sel[:, 1] + 1.0) * 0.5 * (h_match - 1)
     xB_norm = sel[:, 2]
     yB_norm = sel[:, 3]
+    cert_sel = best_cert.reshape(-1).numpy()[sel_idx]
 
     hA_img, wA_img = imA_np.shape[0], imA_np.shape[1]
     sxA_img = wA_img / float(w_match)
@@ -192,6 +175,9 @@ def _triangulate_ref(
         groups.setdefault(nbr_id, []).append(i)
 
     job_xyz, job_rgb, job_err = [], [], []
+    debug_matches_by_nbr: Dict[int, np.ndarray] = {}
+    debug_cert_by_nbr: Dict[int, np.ndarray] = {}
+    cert_denom = float(matcher_sample_cap) if float(matcher_sample_cap) > 1e-6 else 1.0
 
     for nbr_id, idxs in groups.items():
         idxs = np.asarray(idxs, dtype=np.int64)
@@ -202,6 +188,9 @@ def _triangulate_ref(
         xB = (xB_norm[idxs] + 1.0) * 0.5 * (w_match - 1)
         yB = (yB_norm[idxs] + 1.0) * 0.5 * (h_match - 1)
         uvB = np.stack([xB * sxB, yB * syB], axis=1)
+        xA_pair = xA[idxs]
+        yA_pair = yA[idxs]
+        cert_pair = cert_sel[idxs]
 
         if (not config.no_filter) and config.sampson_thresh > 0:
             F = fundamental_from_world2cam(
@@ -220,6 +209,9 @@ def _triangulate_ref(
             xB = xB[good]
             yB = yB[good]
             uvB = uvB[good]
+            xA_pair = xA_pair[good]
+            yA_pair = yA_pair[good]
+            cert_pair = cert_pair[good]
         if idxs.size == 0:
             continue
 
@@ -253,13 +245,23 @@ def _triangulate_ref(
         job_rgb.append(col)
         job_err.append(e)
 
+        if collect_debug_matches:
+            xA_keep = np.clip(xA_pair[keep], 0.0, float(w_match - 1))
+            yA_keep = np.clip(yA_pair[keep], 0.0, float(h_match - 1))
+            xB_keep = np.clip(xB[keep], 0.0, float(w_match - 1))
+            yB_keep = np.clip(yB[keep], 0.0, float(h_match - 1))
+            matches_keep = np.stack([xA_keep, yA_keep, xB_keep, yB_keep], axis=1).astype(np.float32, copy=False)
+            cert_keep = np.clip(cert_pair[keep] / cert_denom, 0.0, 1.0).astype(np.float32, copy=False)
+            debug_matches_by_nbr[nbr_id] = matches_keep
+            debug_cert_by_nbr[nbr_id] = cert_keep
+
     if not job_xyz:
         return None
 
     xyz = np.concatenate(job_xyz, axis=0)
     rgb = np.concatenate(job_rgb, axis=0)
     err = np.concatenate(job_err, axis=0)
-    return xyz, rgb, err
+    return xyz, rgb, err, debug_matches_by_nbr, debug_cert_by_nbr
 
 
 def run_dense_pipeline(
@@ -320,7 +322,7 @@ def run_dense_pipeline(
         for idx, ref_local in enumerate(refs_local):
             if progress_callback:
                 pct = 10.0 + (float(idx) / max(1, total_refs)) * 80.0
-                progress_callback(pct, f"Matching view {idx + 1}/{total_refs}")
+                progress_callback(pct, f"matching {idx + 1}/{total_refs} | {(idx + 1) / max(0.001, time.time() - t0):.1f} it/s")
 
             ref_id = img_ids[ref_local]
             ref_path = path_by[ref_id]
@@ -352,6 +354,8 @@ def run_dense_pipeline(
             nn_ids: List[int] = []
             nn_masks: List[Optional[np.ndarray]] = []
             nn_images: List[Image.Image] = []
+            pair_index_by_nbr: Dict[int, int] = {}
+            image_by_nbr: Dict[int, np.ndarray] = {}
 
             # Load neighbors sequentially
             for nn_local in local_nns:
@@ -415,33 +419,8 @@ def run_dense_pipeline(
                 warp_cpu = warp_hw.detach().to("cpu", non_blocking=True)
                 cert_cpu = cert_hw.detach().to("cpu", non_blocking=True)
                 pair_counter += 1
-
-                if debug_state is not None and debug_state.is_enabled():
-                    # Throttle: only build a preview every N pairs (or always in manual-step mode)
-                    should_preview = (
-                        not debug_state.is_auto_step()
-                        or _DEBUG_PREVIEW_INTERVAL <= 0
-                        or pair_counter % _DEBUG_PREVIEW_INTERVAL == 1
-                    )
-                    if should_preview:
-                        try:
-                            preview = _build_match_preview(
-                                imA_np,
-                                imB_np,
-                                warp_cpu,
-                                cert_cpu,
-                                matcher.sample_thresh,
-                                ref_id,
-                                nbr_id,
-                                os.path.basename(ref_path),
-                                os.path.basename(path_by[nbr_id]),
-                                pair_counter,
-                                total_pairs_est if total_pairs_est > 0 else pair_counter,
-                            )
-                            if preview:
-                                debug_state.submit_preview(preview)
-                        except Exception as exc:
-                            lf.log.warn(f"Debug preview failed: {exc}")
+                pair_index_by_nbr[nbr_id] = pair_counter
+                image_by_nbr[nbr_id] = imB_np
 
                 warp_list_cpu.append(warp_cpu)
                 cert_list_cpu.append(cert_cpu)
@@ -453,6 +432,8 @@ def run_dense_pipeline(
 
             if not cert_list_cpu:
                 continue
+
+            collect_debug_matches = debug_state is not None and debug_state.is_enabled()
 
             # Triangulate this reference view's matches inline
             try:
@@ -474,17 +455,52 @@ def run_dense_pipeline(
                     size_by,
                     config,
                     matcher.sample_thresh,
+                    collect_debug_matches=collect_debug_matches,
                 )
             except Exception as ex:
                 lf.log.error(f"Triangulation error for ref {ref_id}: {ex}")
                 result = None
 
             if result is not None:
-                xyz, rgb, err = result
+                xyz, rgb, err, debug_matches_by_nbr, debug_cert_by_nbr = result
                 all_xyz.append(xyz)
                 all_rgb.append(rgb)
                 all_err.append(err)
                 pairs_processed += 1
+
+                if collect_debug_matches:
+                    total_pairs_val = total_pairs_est if total_pairs_est > 0 else max(pair_counter, 1)
+                    for nbr_id, matches in debug_matches_by_nbr.items():
+                        imB_np = image_by_nbr.get(nbr_id)
+                        pair_idx = pair_index_by_nbr.get(nbr_id)
+                        cert_norm = debug_cert_by_nbr.get(nbr_id)
+                        if imB_np is None or pair_idx is None or cert_norm is None:
+                            continue
+                        should_preview = (
+                            not debug_state.is_auto_step()
+                            or _DEBUG_PREVIEW_INTERVAL <= 0
+                            or pair_idx % _DEBUG_PREVIEW_INTERVAL == 1
+                        )
+                        if not should_preview:
+                            continue
+                        try:
+                            preview = _build_filtered_match_preview(
+                                imA_np,
+                                imB_np,
+                                matches,
+                                cert_norm,
+                                ref_id,
+                                nbr_id,
+                                os.path.basename(ref_path),
+                                os.path.basename(path_by[nbr_id]),
+                                pair_idx,
+                                total_pairs_val,
+                                match_count=int(matches.shape[0]),
+                            )
+                            if preview:
+                                debug_state.submit_preview(preview)
+                        except Exception as exc:
+                            lf.log.warn(f"Debug preview failed: {exc}")
 
                 # Intermediate visualization
                 if (
