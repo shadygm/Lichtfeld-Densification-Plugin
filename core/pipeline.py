@@ -1,8 +1,10 @@
 """Shared dense pipeline orchestration."""
 from __future__ import annotations
 
+import math
 import os
 import time
+import gc
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -10,6 +12,7 @@ import lichtfeld as lf
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset
 from PIL import Image
 
 from .camera_models import CameraRecord
@@ -41,6 +44,150 @@ class PipelineResult:
     pairs_processed: int
 
 _PREVIEW_MAX_MATCHES = 10000
+
+
+@dataclass
+class _PackedReferenceBatch:
+    """Single reference package produced by DataLoader workers."""
+
+    ref_id: int
+    ref_path: str
+    imA_np: np.ndarray
+    maskA_np: Optional[np.ndarray]
+    wA_cam: int
+    hA_cam: int
+    nn_ids: List[int]
+    nn_masks: List[Optional[np.ndarray]]
+    nn_arrays: List[np.ndarray]
+
+
+def _pack_reference_batch(
+    ref_local: int,
+    img_ids: List[int],
+    path_by: Dict[int, str],
+    mask_by: Dict[int, Optional[str]],
+    size_by: Dict[int, Tuple[int, int]],
+    nn_table: np.ndarray,
+    nns_per_ref: int,
+    w_match: int,
+    h_match: int,
+) -> Optional[_PackedReferenceBatch]:
+    """Load and preprocess a single reference package for compute."""
+
+    ref_id = img_ids[ref_local]
+    ref_path = path_by[ref_id]
+    try:
+        imA = load_rgb_resized(ref_path, (w_match, h_match))
+    except Exception as exc:
+        lf.log.warn(f"Failed to load reference {ref_path}: {exc}")
+        return None
+
+    maskA_np = None
+    ref_mask_path = mask_by.get(ref_id)
+    if ref_mask_path:
+        try:
+            maskA_np = load_mask_resized_np(ref_mask_path, (w_match, h_match))
+            imA = apply_mask_to_rgb(imA, maskA_np)
+        except Exception as exc:
+            lf.log.warn(f"Failed to load/apply mask for reference {ref_id}: {exc}")
+            maskA_np = None
+
+    local_nns = nn_table[ref_local][:nns_per_ref]
+    if len(local_nns) == 0:
+        return None
+
+    nn_ids: List[int] = []
+    nn_masks: List[Optional[np.ndarray]] = []
+    nn_arrays: List[np.ndarray] = []
+
+    for nn_local in local_nns:
+        nbr_id = img_ids[nn_local]
+        if nbr_id == ref_id:
+            continue
+        try:
+            img_path = path_by[nbr_id]
+            imB = load_rgb_resized(img_path, (w_match, h_match))
+
+            maskB_np = None
+            nbr_mask_path = mask_by.get(nbr_id)
+            if nbr_mask_path:
+                try:
+                    maskB_np = load_mask_resized_np(nbr_mask_path, (w_match, h_match))
+                    imB = apply_mask_to_rgb(imB, maskB_np)
+                except Exception as exc:
+                    lf.log.warn(f"Failed to load/apply mask for neighbor {nbr_id}: {exc}")
+                    maskB_np = None
+
+            nn_ids.append(nbr_id)
+            nn_masks.append(maskB_np)
+            nn_arrays.append(np.asarray(imB, dtype=np.uint8))
+        except Exception as exc:
+            lf.log.warn(f"Failed to load neighbor {nbr_id}: {exc}")
+
+    if not nn_arrays:
+        return None
+
+    imA_np = np.asarray(imA, dtype=np.uint8)
+    wA_cam, hA_cam = size_by[ref_id]
+    return _PackedReferenceBatch(
+        ref_id=ref_id,
+        ref_path=ref_path,
+        imA_np=imA_np,
+        maskA_np=maskA_np,
+        wA_cam=wA_cam,
+        hA_cam=hA_cam,
+        nn_ids=nn_ids,
+        nn_masks=nn_masks,
+        nn_arrays=nn_arrays,
+    )
+
+
+class _PackedReferenceDataset(Dataset):
+    """Indexable dataset that packs reference batches for compute."""
+
+    def __init__(
+        self,
+        refs_local: List[int],
+        img_ids: List[int],
+        path_by: Dict[int, str],
+        mask_by: Dict[int, Optional[str]],
+        size_by: Dict[int, Tuple[int, int]],
+        nn_table: np.ndarray,
+        nns_per_ref: int,
+        w_match: int,
+        h_match: int,
+    ) -> None:
+        self._refs_local = refs_local
+        self._img_ids = img_ids
+        self._path_by = path_by
+        self._mask_by = mask_by
+        self._size_by = size_by
+        self._nn_table = nn_table
+        self._nns_per_ref = nns_per_ref
+        self._w_match = w_match
+        self._h_match = h_match
+
+    def __len__(self) -> int:
+        return len(self._refs_local)
+
+    def __getitem__(self, index: int) -> Optional[_PackedReferenceBatch]:
+        ref_local = self._refs_local[index]
+        return _pack_reference_batch(
+            ref_local,
+            self._img_ids,
+            self._path_by,
+            self._mask_by,
+            self._size_by,
+            self._nn_table,
+            self._nns_per_ref,
+            self._w_match,
+            self._h_match,
+        )
+
+
+def _single_item_collate(batch: List[Optional[_PackedReferenceBatch]]) -> Optional[_PackedReferenceBatch]:
+    """Identity collate for batch_size=1 DataLoader."""
+    return batch[0] if batch else None
 
 
 def _build_filtered_match_preview(
@@ -318,76 +465,72 @@ def run_dense_pipeline(
 
         total_refs = len(refs_local)
         w_match, h_match = matcher.w_resized, matcher.h_resized
+        prefetch_packages = max(1, int(getattr(config, "prefetch_packages", 8)))
+        pack_workers = max(1, int(getattr(config, "pack_workers", 4)))
+        prefetch_factor = max(1, int(math.ceil(float(prefetch_packages) / float(pack_workers))))
 
-        for idx, ref_local in enumerate(refs_local):
+        pack_dataset = _PackedReferenceDataset(
+            refs_local=refs_local,
+            img_ids=img_ids,
+            path_by=path_by,
+            mask_by=mask_by,
+            size_by=size_by,
+            nn_table=nn_table,
+            nns_per_ref=config.nns_per_ref,
+            w_match=w_match,
+            h_match=h_match,
+        )
+
+        loader_kwargs = dict(
+            dataset=pack_dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=pack_workers,
+            prefetch_factor=prefetch_factor,
+            persistent_workers=pack_workers > 0,
+            pin_memory=False,
+            drop_last=False,
+            collate_fn=_single_item_collate,
+        )
+        # PyTorch versions that support out-of-order delivery can avoid
+        # head-of-line stalls from a single slow sample.
+        if "in_order" in DataLoader.__init__.__code__.co_varnames:
+            loader_kwargs["in_order"] = False
+        pack_loader = DataLoader(**loader_kwargs)
+
+        refs_consumed = 0
+        for packed in pack_loader:
+            refs_consumed += 1
+
             if progress_callback:
-                pct = 10.0 + (float(idx) / max(1, total_refs)) * 80.0
-                progress_callback(pct, f"matching {idx + 1}/{total_refs} | {(idx + 1) / max(0.001, time.time() - t0):.1f} it/s")
+                pct = 10.0 + (float(refs_consumed - 1) / max(1, total_refs)) * 80.0
+                progress_callback(
+                    pct,
+                    f"matching {refs_consumed}/{total_refs} | {refs_consumed / max(0.001, time.time() - t0):.1f} it/s",
+                )
 
-            ref_id = img_ids[ref_local]
-            ref_path = path_by[ref_id]
-            try:
-                imA = load_rgb_resized(ref_path, (w_match, h_match))
-            except Exception as exc:
-                lf.log.warn(f"Failed to load reference {ref_path}: {exc}")
+            if packed is None:
                 continue
 
-            # If a mask is available, restrict matching to masked-in pixels.
-            maskA_np = None
-            ref_mask_path = mask_by.get(ref_id)
-            if ref_mask_path:
-                try:
-                    maskA_np = load_mask_resized_np(ref_mask_path, (w_match, h_match))
-                    imA = apply_mask_to_rgb(imA, maskA_np)
-                except Exception as exc:
-                    lf.log.warn(f"Failed to load/apply mask for reference {ref_id}: {exc}")
-                    maskA_np = None
+            ref_id = packed.ref_id
+            ref_path = packed.ref_path
+            imA_np = packed.imA_np
+            maskA_np = packed.maskA_np
+            wA_cam = packed.wA_cam
+            hA_cam = packed.hA_cam
+            nn_ids = packed.nn_ids
+            nn_masks = packed.nn_masks
+            nn_arrays = packed.nn_arrays
 
-            imA_np = np.asarray(imA, dtype=np.uint8)
-            wA_cam, hA_cam = size_by[ref_id]
-            local_nns = nn_table[ref_local][: config.nns_per_ref]
-            if len(local_nns) == 0:
-                continue
+            imA = Image.fromarray(np.ascontiguousarray(imA_np))
+            nn_images = [Image.fromarray(np.ascontiguousarray(arr)) for arr in nn_arrays]
 
             warp_list_cpu: List[torch.Tensor] = []
             cert_list_cpu: List[torch.Tensor] = []
-            nn_ids: List[int] = []
-            nn_masks: List[Optional[np.ndarray]] = []
-            nn_images: List[Image.Image] = []
             pair_index_by_nbr: Dict[int, int] = {}
             image_by_nbr: Dict[int, np.ndarray] = {}
 
-            # Load neighbors sequentially
-            for nn_local in local_nns:
-                nbr_id = img_ids[nn_local]
-                if nbr_id == ref_id:
-                    continue
-                try:
-                    img_path = path_by[nbr_id]
-                    imB = load_rgb_resized(img_path, (w_match, h_match))
-
-                    maskB_np = None
-                    nbr_mask_path = mask_by.get(nbr_id)
-                    if nbr_mask_path:
-                        try:
-                            maskB_np = load_mask_resized_np(nbr_mask_path, (w_match, h_match))
-                            imB = apply_mask_to_rgb(imB, maskB_np)
-                        except Exception as exc:
-                            lf.log.warn(f"Failed to load/apply mask for neighbor {nbr_id}: {exc}")
-                            maskB_np = None
-
-                    nn_images.append(imB)
-                    nn_ids.append(nbr_id)
-                    nn_masks.append(maskB_np)
-                except Exception as exc:
-                    lf.log.warn(f"Failed to load neighbor: {exc}")
-
-            if not nn_images:
-                continue
-
-            nn_arrays = [np.asarray(img, dtype=np.uint8) for img in nn_images]
             batch_results = matcher.match_grids_batch(imA, nn_images)
-            # Precompute reference mask tensor on the match device (if present).
             maskA_t = None
             if maskA_np is not None:
                 maskA_t = torch.from_numpy(maskA_np.astype(np.float32))
@@ -395,11 +538,9 @@ def run_dense_pipeline(
             for (warp_hw, cert_hw), maskB_np, nbr_id, imB_np in zip(batch_results, nn_masks, nn_ids, nn_arrays):
                 cert_hw = torch.clamp(cert_hw, min=config.certainty_thresh)
 
-                # Apply reference mask (A): cert becomes 0 outside mask.
                 if maskA_t is not None:
                     cert_hw = cert_hw * maskA_t.to(device=cert_hw.device, dtype=cert_hw.dtype)
 
-                # Apply neighbor mask (B): cert becomes 0 if warp lands outside B's mask.
                 if maskB_np is not None:
                     maskB_t = (
                         torch.from_numpy(maskB_np.astype(np.float32))
@@ -435,7 +576,6 @@ def run_dense_pipeline(
 
             collect_debug_matches = debug_state is not None and debug_state.is_enabled()
 
-            # Triangulate this reference view's matches inline
             try:
                 result = _triangulate_ref(
                     ref_id,
@@ -461,69 +601,75 @@ def run_dense_pipeline(
                 lf.log.error(f"Triangulation error for ref {ref_id}: {ex}")
                 result = None
 
-            if result is not None:
-                xyz, rgb, err, debug_matches_by_nbr, debug_cert_by_nbr = result
-                all_xyz.append(xyz)
-                all_rgb.append(rgb)
-                all_err.append(err)
-                pairs_processed += 1
+            if result is None:
+                continue
 
-                if collect_debug_matches:
-                    total_pairs_val = total_pairs_est if total_pairs_est > 0 else max(pair_counter, 1)
-                    for nbr_id, matches in debug_matches_by_nbr.items():
-                        imB_np = image_by_nbr.get(nbr_id)
-                        pair_idx = pair_index_by_nbr.get(nbr_id)
-                        cert_norm = debug_cert_by_nbr.get(nbr_id)
-                        if imB_np is None or pair_idx is None or cert_norm is None:
-                            continue
-                        should_preview = (
-                            not debug_state.is_auto_step()
-                            or _DEBUG_PREVIEW_INTERVAL <= 0
-                            or pair_idx % _DEBUG_PREVIEW_INTERVAL == 1
-                        )
-                        if not should_preview:
-                            continue
-                        try:
-                            preview = _build_filtered_match_preview(
-                                imA_np,
-                                imB_np,
-                                matches,
-                                cert_norm,
-                                ref_id,
-                                nbr_id,
-                                os.path.basename(ref_path),
-                                os.path.basename(path_by[nbr_id]),
-                                pair_idx,
-                                total_pairs_val,
-                                match_count=int(matches.shape[0]),
-                            )
-                            if preview:
-                                debug_state.submit_preview(preview)
-                        except Exception as exc:
-                            lf.log.warn(f"Debug preview failed: {exc}")
+            xyz, rgb, err, debug_matches_by_nbr, debug_cert_by_nbr = result
+            all_xyz.append(xyz)
+            all_rgb.append(rgb)
+            all_err.append(err)
+            pairs_processed += 1
 
-                # Intermediate visualization
-                if (
-                    on_sequential_viz
-                    and viz_interval > 0
-                    and pairs_processed % viz_interval == 0
-                    and intermediate_ply_base
-                ):
+            if collect_debug_matches:
+                total_pairs_val = total_pairs_est if total_pairs_est > 0 else max(pair_counter, 1)
+                for nbr_id, matches in debug_matches_by_nbr.items():
+                    imB_np = image_by_nbr.get(nbr_id)
+                    pair_idx = pair_index_by_nbr.get(nbr_id)
+                    cert_norm = debug_cert_by_nbr.get(nbr_id)
+                    if imB_np is None or pair_idx is None or cert_norm is None:
+                        continue
+                    should_preview = (
+                        not debug_state.is_auto_step()
+                        or _DEBUG_PREVIEW_INTERVAL <= 0
+                        or pair_idx % _DEBUG_PREVIEW_INTERVAL == 1
+                    )
+                    if not should_preview:
+                        continue
                     try:
-                        xyz_so_far = np.concatenate(all_xyz, axis=0)
-                        rgb_so_far = np.concatenate(all_rgb, axis=0)
-                        intermediate_ply_path = f"{intermediate_ply_base}_{pairs_processed}.ply"
-                        write_ply(intermediate_ply_path, xyz_so_far, to_uint8_rgb(rgb_so_far))
-                        lf.log.debug(
-                            f"Live update: {xyz_so_far.shape[0]:,} points after {pairs_processed} refs"
+                        preview = _build_filtered_match_preview(
+                            imA_np,
+                            imB_np,
+                            matches,
+                            cert_norm,
+                            ref_id,
+                            nbr_id,
+                            os.path.basename(ref_path),
+                            os.path.basename(path_by[nbr_id]),
+                            pair_idx,
+                            total_pairs_val,
+                            match_count=int(matches.shape[0]),
                         )
-                        on_sequential_viz(intermediate_ply_path)
+                        if preview:
+                            debug_state.submit_preview(preview)
                     except Exception as exc:
-                        lf.log.warn(f"Failed to emit intermediate PLY: {exc}")
+                        lf.log.warn(f"Debug preview failed: {exc}")
+
+            if (
+                on_sequential_viz
+                and viz_interval > 0
+                and pairs_processed % viz_interval == 0
+                and intermediate_ply_base
+            ):
+                try:
+                    xyz_so_far = np.concatenate(all_xyz, axis=0)
+                    rgb_so_far = np.concatenate(all_rgb, axis=0)
+                    intermediate_ply_path = f"{intermediate_ply_base}_{pairs_processed}.ply"
+                    write_ply(intermediate_ply_path, xyz_so_far, to_uint8_rgb(rgb_so_far))
+                    lf.log.debug(
+                        f"Live update: {xyz_so_far.shape[0]:,} points after {pairs_processed} refs"
+                    )
+                    on_sequential_viz(intermediate_ply_path)
+                except Exception as exc:
+                    lf.log.warn(f"Failed to emit intermediate PLY: {exc}")
 
     finally:
         if matcher is not None:
+            try:
+                matcher.close()
+            except Exception as exc:
+                lf.log.warn(f"Matcher cleanup failed: {exc}")
             del matcher
+        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()

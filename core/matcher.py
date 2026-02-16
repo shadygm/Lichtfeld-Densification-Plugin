@@ -1,6 +1,7 @@
 """RoMaV2 matcher wrapper."""
 from __future__ import annotations
 
+import gc
 from typing import List, Tuple
 
 import lichtfeld as lf
@@ -42,8 +43,35 @@ class RomaMatcher:
             f"RoMaV2 initialized (setting={setting}, H_lr={self.model.H_lr}, W_lr={self.model.W_lr}, device={device})"
         )
 
+    def close(self) -> None:
+        """Release model weights and CUDA allocations for this matcher."""
+        model = getattr(self, "model", None)
+        if model is None:
+            return
+        try:
+            model.to("cpu")
+        except Exception:
+            pass
+        self.model = None
+        gc.collect()
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
     @torch.inference_mode()
     def match_grids(self, imA: Image.Image, imB: Image.Image) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.model is None:
+            raise RuntimeError("RoMaV2 model has been released; create a new matcher before matching.")
         torch.set_float32_matmul_precision("highest")
         preds = self.model.match(imA, imB)
         warp_AB = preds["warp_AB"][0]

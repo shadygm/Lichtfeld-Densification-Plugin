@@ -136,6 +136,8 @@ def dense_init(
         no_filter=args.no_filter,
         seed=args.seed,
         viz_interval=0,
+        prefetch_packages=args.prefetch_packages,
+        pack_workers=args.pack_workers,
     )
 
     result = run_dense_pipeline(
@@ -317,6 +319,18 @@ def build_argparser():
         type=int,
         default=0,
         help="Optional cap on total points (0 = unlimited)",
+    )
+    ap.add_argument(
+        "--prefetch_packages",
+        type=int,
+        default=8,
+        help="Approximate total reference packages prefetched by DataLoader workers",
+    )
+    ap.add_argument(
+        "--pack_workers",
+        type=int,
+        default=4,
+        help="Number of DataLoader workers packing reference packages",
     )
     ap.add_argument("--seed", type=int, default=0, help="Random seed")
     return ap

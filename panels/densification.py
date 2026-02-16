@@ -358,6 +358,25 @@ class DensificationPanel(Panel):
             _, self.config.no_filter = layout.checkbox("Disable Filtering", self.config.no_filter)
 
             layout.separator()
+            layout.label("Pipeline Performance:")
+            _, self.config.prefetch_packages = layout.drag_int(
+                "Pack Ahead (refs)",
+                self.config.prefetch_packages,
+                1,
+                1,
+                32,
+            )
+            layout.label("(How many reference packages are prepared ahead of compute)")
+            _, self.config.pack_workers = layout.drag_int(
+                "Pack Workers",
+                self.config.pack_workers,
+                1,
+                1,
+                16,
+            )
+            layout.label("(Parallel workers used to prepare packages)")
+
+            layout.separator()
             layout.label("Live Preview:")
             
             _, self.config.viz_interval = layout.drag_int("Update Every N Pairs", self.config.viz_interval, 1, 0, 100)
