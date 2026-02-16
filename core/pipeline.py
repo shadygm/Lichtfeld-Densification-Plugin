@@ -5,6 +5,7 @@ import math
 import os
 import time
 import gc
+import sys
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -466,8 +467,18 @@ def run_dense_pipeline(
         total_refs = len(refs_local)
         w_match, h_match = matcher.w_resized, matcher.h_resized
         prefetch_packages = max(1, int(getattr(config, "prefetch_packages", 8)))
-        pack_workers = max(1, int(getattr(config, "pack_workers", 4)))
-        prefetch_factor = max(1, int(math.ceil(float(prefetch_packages) / float(pack_workers))))
+        requested_workers = int(getattr(config, "pack_workers", 4))
+        pack_workers = max(0, requested_workers)
+        is_windows_embedded = (
+            os.name == "nt"
+            and os.path.basename(sys.executable).lower() == "lichtfeld-studio.exe"
+        )
+        if is_windows_embedded and pack_workers > 0:
+            lf.log.warn(
+                "Windows embedded runtime detected; forcing pack_workers=0 to avoid "
+                "multiprocessing worker launch via LichtFeld-Studio.exe."
+            )
+            pack_workers = 0
 
         pack_dataset = _PackedReferenceDataset(
             refs_local=refs_local,
@@ -486,12 +497,14 @@ def run_dense_pipeline(
             batch_size=1,
             shuffle=False,
             num_workers=pack_workers,
-            prefetch_factor=prefetch_factor,
             persistent_workers=pack_workers > 0,
             pin_memory=False,
             drop_last=False,
             collate_fn=_single_item_collate,
         )
+        if pack_workers > 0:
+            prefetch_factor = max(1, int(math.ceil(float(prefetch_packages) / float(pack_workers))))
+            loader_kwargs["prefetch_factor"] = prefetch_factor
         # PyTorch versions that support out-of-order delivery can avoid
         # head-of-line stalls from a single slow sample.
         if "in_order" in DataLoader.__init__.__code__.co_varnames:

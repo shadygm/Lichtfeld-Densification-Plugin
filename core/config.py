@@ -1,7 +1,16 @@
 """Shared configuration dataclasses."""
 from __future__ import annotations
 
+import os
+import sys
 from dataclasses import dataclass
+
+
+def _default_pack_workers() -> int:
+    if os.name != "nt":
+        return 4
+    exe_name = os.path.basename(sys.executable).lower()
+    return 0 if exe_name == "lichtfeld-studio.exe" else 4
 
 
 @dataclass
@@ -20,4 +29,4 @@ class DensePipelineConfig:
     seed: int = 0
     viz_interval: int = 3
     prefetch_packages: int = 8
-    pack_workers: int = 4
+    pack_workers: int = _default_pack_workers()

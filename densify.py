@@ -26,6 +26,13 @@ from core.selection import nearest_neighbors, select_cameras_by_visibility, sele
 from core.writers import write_ply, write_points3D_bin
 
 
+def _default_pack_workers() -> int:
+    if os.name != "nt":
+        return 4
+    exe_name = os.path.basename(sys.executable).lower()
+    return 0 if exe_name == "lichtfeld-studio.exe" else 4
+
+
 def load_reconstruction(sparse_dir: str):
     rec = pycolmap.Reconstruction(sparse_dir)
     return rec, rec.cameras, rec.images
@@ -329,8 +336,8 @@ def build_argparser():
     ap.add_argument(
         "--pack_workers",
         type=int,
-        default=4,
-        help="Number of DataLoader workers packing reference packages",
+        default=_default_pack_workers(),
+        help="Number of DataLoader workers packing reference packages (0 = main thread)",
     )
     ap.add_argument("--seed", type=int, default=0, help="Random seed")
     return ap

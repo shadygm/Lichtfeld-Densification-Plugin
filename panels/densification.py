@@ -371,10 +371,10 @@ class DensificationPanel(Panel):
                 "Pack Workers",
                 self.config.pack_workers,
                 1,
-                1,
+                0,
                 16,
             )
-            layout.label("(Parallel workers used to prepare packages)")
+            layout.label("(Parallel workers used to prepare packages; set 0 for main-thread packing)")
 
             layout.separator()
             layout.label("Live Preview:")
