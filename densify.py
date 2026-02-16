@@ -50,6 +50,7 @@ def _build_camera_records_from_colmap(
             CameraRecord(
                 uid=iid,
                 image_path=img_path,
+                mask_path=None,
                 width=cam.width,
                 height=cam.height,
                 K=K,
@@ -103,7 +104,11 @@ def _write_output(path: str, xyz: np.ndarray, rgb: np.ndarray, err: np.ndarray) 
         write_points3D_bin(path, xyz, rgb_uint8, err)
 
 
-def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] = None) -> int:
+def dense_init(
+    args,
+    progress_callback: Optional[Callable[[float, str], None]] = None,
+    debug_state=None,
+) -> int:
     np.random.seed(args.seed)
     scene_root = os.path.abspath(args.scene_root)
     sparse_dir = os.path.join(scene_root, "sparse", "0")
@@ -131,6 +136,8 @@ def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] =
         no_filter=args.no_filter,
         seed=args.seed,
         viz_interval=0,
+        prefetch_packages=args.prefetch_packages,
+        pack_workers=args.pack_workers,
     )
 
     result = run_dense_pipeline(
@@ -140,6 +147,7 @@ def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] =
         config,
         progress_callback=progress_callback,
         on_sequential_viz=None,
+        debug_state=debug_state,
     )
 
     xyz, rgb, err = _apply_point_cap(result.xyz, result.rgb, result.err, args.max_points, args.seed)
@@ -150,11 +158,6 @@ def dense_init(args, progress_callback: Optional[Callable[[float, str], None]] =
     if progress_callback:
         progress_callback(100.0, f"Done! {xyz.shape[0]:,} points")
     return 0
-
-
-LFSDenseConfig = DensePipelineConfig
-
-
 def extract_cameras_from_lfs(camera_nodes) -> List[CameraRecord]:
     records: List[CameraRecord] = []
     for node in camera_nodes:
@@ -175,6 +178,7 @@ def extract_cameras_from_lfs(camera_nodes) -> List[CameraRecord]:
             CameraRecord(
                 uid=node.camera_uid,
                 image_path=node.image_path,
+                mask_path=(node.mask_path if getattr(node, "has_mask", False) else None),
                 width=width,
                 height=height,
                 K=K,
@@ -192,6 +196,7 @@ def dense_init_from_lfs(
     config: DensePipelineConfig,
     progress_callback: Optional[Callable[[float, str], None]] = None,
     on_sequential_viz: Optional[Callable[[str], None]] = None,
+    debug_state=None,
 ) -> Tuple[int, Optional[str]]:
     np.random.seed(config.seed)
     if progress_callback:
@@ -216,6 +221,7 @@ def dense_init_from_lfs(
             config,
             progress_callback=progress_callback,
             on_sequential_viz=on_sequential_viz,
+            debug_state=debug_state,
         )
     except RuntimeError as exc:
         return 1, str(exc)
@@ -313,6 +319,18 @@ def build_argparser():
         type=int,
         default=0,
         help="Optional cap on total points (0 = unlimited)",
+    )
+    ap.add_argument(
+        "--prefetch_packages",
+        type=int,
+        default=8,
+        help="Approximate total reference packages prefetched by DataLoader workers",
+    )
+    ap.add_argument(
+        "--pack_workers",
+        type=int,
+        default=4,
+        help="Number of DataLoader workers packing reference packages",
     )
     ap.add_argument("--seed", type=int, default=0, help="Random seed")
     return ap
