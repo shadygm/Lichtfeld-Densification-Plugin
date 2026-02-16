@@ -15,7 +15,7 @@ class DensePipelineConfig:
     reproj_thresh: float = 0.8
     sampson_thresh: float = 5.0
     min_parallax_deg: float = 0.5
-    max_points: int = 1000000
+    max_points: int = 0
     no_filter: bool = False
     seed: int = 0
     viz_interval: int = 3
