@@ -4,15 +4,16 @@
 
 from .densification import (
     DensificationPanel,
-    DensifyConfig,
     DensifyResult,
     DensifyJob,
     DensifyStage,
 )
 
+from ..core.config import DensePipelineConfig
+
 __all__ = [
     "DensificationPanel",
-    "DensifyConfig",
+    "DensePipelineConfig",
     "DensifyResult",
     "DensifyJob",
     "DensifyStage",

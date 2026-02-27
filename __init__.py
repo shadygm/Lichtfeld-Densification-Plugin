@@ -9,9 +9,9 @@ high-quality point clouds.
 import lichtfeld as lf
 
 from .densify import dense_init
+from .core.config import DensePipelineConfig
 from .panels.densification import (
     DensificationPanel,
-    DensifyConfig,
     DensifyResult,
     DensifyJob,
     DensifyStage,
@@ -36,8 +36,8 @@ def on_unload():
 
 __all__ = [
     "dense_init",
+    "DensePipelineConfig",
     "DensificationPanel",
-    "DensifyConfig",
     "DensifyResult",
     "DensifyJob",
     "DensifyStage",

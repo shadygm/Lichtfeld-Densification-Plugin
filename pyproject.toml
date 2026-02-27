@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-[plugin]
+[project]
 name = "densification"
-version = "1.0.0"
+version = "0.5.0"
 description = "Dense point cloud initialization using RoMa v2 matching"
-author = "LichtFeld"
-min_lichtfeld_version = "1.0.0"
+author = "Shady Gmira"
+min_lichtfeld_version = "0.5.0"
 
-[dependencies]
-packages = [
+
+dependencies = [
     "torch",
     "torchvision",
     "numpy==2.4.1",
@@ -18,14 +18,18 @@ packages = [
     "scipy",
     "tqdm",
     "einops>=0.8.1",
-    "rich>=14.2.0"
+    "rich>=14.2.0",
 ]
 
-local_packages = [
-    "RoMaV2"
-]
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128" }]
+torchvision = [{ index = "pytorch-cu128" }]
 
-[lifecycle]
+[tool.lichtfeld]
 auto_start = true
 hot_reload = true
