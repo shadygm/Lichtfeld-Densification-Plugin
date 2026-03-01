@@ -1,10 +1,20 @@
 """Geometry helpers for densification pipeline."""
 from __future__ import annotations
 
+import sys as _sys
 from typing import Tuple
 
 import numpy as np
+
+# Guard sys.argv before importing pycolmap: its C extension statically links
+# gflags which calls ParseCommandLineFlags(sys.argv) at module init.  On
+# Windows, multiprocessing workers (spawn) re-import everything and gflags
+# chokes on whatever flags the host application left in sys.argv.
+_saved_argv = _sys.argv
+_sys.argv = _sys.argv[:1]
 import pycolmap
+_sys.argv = _saved_argv
+del _saved_argv
 
 
 def K_from_camera(cam: pycolmap.Camera) -> np.ndarray:
