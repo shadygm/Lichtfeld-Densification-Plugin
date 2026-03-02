@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import math
 import os
+import platform
+import sys
 import time
 import gc
 from dataclasses import dataclass
@@ -33,6 +35,26 @@ from .writers import write_ply
 
 # How often to generate a debug preview (every N pairs). 0 = every pair.
 _DEBUG_PREVIEW_INTERVAL = 3
+
+
+def _is_embedded_python() -> bool:
+    """Detect whether Python is embedded inside a host application.
+
+    When embedded (e.g. inside LichtFeld Studio), DataLoader workers cannot be
+    used because:
+      1. ``sys.executable`` is the host exe — ``multiprocessing.spawn`` passes
+         interpreter flags (like ``-s``) that the host does not understand.
+      2. Even with the correct ``python.exe``, the plugin module namespace
+         (``lfs_plugins.densification``) is registered at runtime by the
+         host’s plugin manager and is not discoverable by a fresh interpreter.
+      3. The ``lichtfeld`` C-extension is only loadable inside the host.
+
+    Returns True when workers must be disabled (num_workers=0).
+    """
+    if platform.system() != "Windows":
+        return False
+    exe_name = os.path.basename(sys.executable).lower()
+    return not exe_name.startswith("python")
 
 
 @dataclass
@@ -519,7 +541,15 @@ def run_dense_pipeline(
         w_match, h_match = matcher.w_resized, matcher.h_resized
         prefetch_packages = max(1, int(getattr(config, "prefetch_packages", 8)))
         pack_workers = max(1, int(getattr(config, "pack_workers", 4)))
-        prefetch_factor = max(1, int(math.ceil(float(prefetch_packages) / float(pack_workers))))
+
+        # On Windows with embedded Python, DataLoader workers are unusable:
+        # the host exe is not a Python interpreter and the plugin module
+        # namespace cannot be resolved by a standalone interpreter.
+        if pack_workers > 0 and _is_embedded_python():
+            lf.log.info("Embedded Python detected; using num_workers=0 for DataLoader")
+            pack_workers = 0
+
+        prefetch_factor = max(1, int(math.ceil(float(prefetch_packages) / max(1, pack_workers))))
 
         pack_dataset = _PackedReferenceDataset(
             refs_local=refs_local,
@@ -538,7 +568,7 @@ def run_dense_pipeline(
             batch_size=1,
             shuffle=False,
             num_workers=pack_workers,
-            prefetch_factor=prefetch_factor,
+            prefetch_factor=prefetch_factor if pack_workers > 0 else None,
             persistent_workers=pack_workers > 0,
             pin_memory=False,
             drop_last=False,
