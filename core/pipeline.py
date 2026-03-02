@@ -358,6 +358,30 @@ def _build_pack_loader(
     )
 
 
+def _mask_tensor_for_hw(
+    mask_np: np.ndarray,
+    target_hw: Tuple[int, int],
+    cache: Optional[Dict[Tuple[int, int], torch.Tensor]] = None,
+) -> torch.Tensor:
+    """Return a float mask tensor resized to the requested HxW."""
+    if cache is not None:
+        cached = cache.get(target_hw)
+        if cached is not None:
+            return cached
+
+    mask_t = torch.from_numpy(mask_np.astype(np.float32, copy=False))
+    if mask_t.shape != target_hw:
+        mask_t = F.interpolate(
+            mask_t.view(1, 1, mask_t.shape[0], mask_t.shape[1]),
+            size=target_hw,
+            mode="nearest",
+        ).squeeze(0).squeeze(0)
+
+    if cache is not None:
+        cache[target_hw] = mask_t
+    return mask_t
+
+
 def _collect_reference_matches(
     packed: _PackedReferenceBatch,
     matcher: RomaMatcher,
@@ -376,25 +400,25 @@ def _collect_reference_matches(
     batch_results = matcher.match_grids_batch(imA, nn_images)
     _raise_if_cancelled(cancel_requested)
 
-    maskA_t = None
-    if packed.maskA_np is not None:
-        maskA_t = torch.from_numpy(packed.maskA_np.astype(np.float32))
+    maskA_cache: Dict[Tuple[int, int], torch.Tensor] = {}
 
     for (warp_hw, cert_hw), maskB_np, nbr_id, imB_np in zip(batch_results, packed.nn_masks, packed.nn_ids, packed.nn_arrays):
-        print("warp_hw:", warp_hw.shape)
-        print("cert_hw:", cert_hw.shape)
         _raise_if_cancelled(cancel_requested)
         cert_hw = torch.clamp(cert_hw, min=config.certainty_thresh)
 
-        if maskA_t is not None:
+        output_hw = (int(warp_hw.shape[0]), int(warp_hw.shape[1]))
+        cert_hw_shape = (int(cert_hw.shape[0]), int(cert_hw.shape[1]))
+        if cert_hw_shape != output_hw:
+            # Keep robust if certainty and warp shapes ever diverge.
+            output_hw = cert_hw_shape
+
+        if packed.maskA_np is not None:
+            maskA_t = _mask_tensor_for_hw(packed.maskA_np, output_hw, cache=maskA_cache)
             cert_hw = cert_hw * maskA_t.to(device=cert_hw.device, dtype=cert_hw.dtype)
 
         if maskB_np is not None:
-            maskB_t = (
-                torch.from_numpy(maskB_np.astype(np.float32))
-                .to(device=cert_hw.device, dtype=cert_hw.dtype)
-                .view(1, 1, cert_hw.shape[0], cert_hw.shape[1])
-            )
+            maskB_t = _mask_tensor_for_hw(maskB_np, output_hw)
+            maskB_t = maskB_t.to(device=cert_hw.device, dtype=cert_hw.dtype).view(1, 1, output_hw[0], output_hw[1])
             gridB = warp_hw[..., 2:4].unsqueeze(0)
             maskB_warp = F.grid_sample(
                 maskB_t,
