@@ -6,3 +6,5 @@ if not any(not isinstance(h, _logging.NullHandler) for h in _logger.handlers):
     configure_logger()
 
 from .romav2 import RoMaV2 as RoMaV2
+
+__all__ = ["RoMaV2", "configure_logger"]

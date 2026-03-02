@@ -160,8 +160,9 @@ class RoMaV2(nn.Module):
             raise TypeError(f"Invalid setting: {setting}")
 
     @torch.inference_mode()
-    def forward(
+    def _forward_from_features(
         self,
+        f_list_A: list[torch.Tensor],
         img_A_lr: torch.Tensor,
         img_B_lr: torch.Tensor,
         img_A_hr: torch.Tensor | None = None,
@@ -173,12 +174,10 @@ class RoMaV2(nn.Module):
         # assumes images between [0, 1]
         # init preds
         predictions = OrderedDict()
-        # extract feats
-        f_A = self.f(img_A_lr)
         f_B = self.f(img_B_lr)
         # match feats
         matcher_output = self.matcher(
-            f_A, f_B, img_A=img_A_lr, img_B=img_B_lr, bidirectional=self.bidirectional
+            list(f_list_A), f_B, img_A=img_A_lr, img_B=img_B_lr, bidirectional=self.bidirectional
         )
         # return matcher_output
         predictions["matcher"] = matcher_output
@@ -202,7 +201,7 @@ class RoMaV2(nn.Module):
                 continue
             B, C, H, W = img_A.shape
             scale_factor = torch.tensor(
-                (W / self.anchor_width, H / self.anchor_height), device=device
+                (W / self.anchor_width, H / self.anchor_height), device=img_A.device
             )
             refiner_features_A = self.refiner_features(img_A)
             refiner_features_B = self.refiner_features(img_B)
@@ -269,6 +268,23 @@ class RoMaV2(nn.Module):
                 predictions["confidence_BA"] = None
         return predictions
 
+    @torch.inference_mode()
+    def forward(
+        self,
+        img_A_lr: torch.Tensor,
+        img_B_lr: torch.Tensor,
+        img_A_hr: torch.Tensor | None = None,
+        img_B_hr: torch.Tensor | None = None,
+    ) -> dict[str, tuple[torch.Tensor, torch.Tensor] | torch.Tensor]:
+        f_list_A = self.f(img_A_lr)
+        return self._forward_from_features(
+            f_list_A=f_list_A,
+            img_A_lr=img_A_lr,
+            img_B_lr=img_B_lr,
+            img_A_hr=img_A_hr,
+            img_B_hr=img_B_hr,
+        )
+
     def _load_image(self, img_like: ImageLike) -> torch.Tensor:
         if isinstance(img_like, str) or isinstance(img_like, Path):
             img_pil = Image.open(img_like)
@@ -296,51 +312,46 @@ class RoMaV2(nn.Module):
             img = img[None]
         return img
 
-    @torch.inference_mode()
-    def match(
+    def _resize_match_image(
         self,
-        img_like_A: ImageLike,
-        img_like_B: ImageLike,
-    ) -> dict[str, torch.Tensor]:
-        self.eval()
-        img_A = self._load_image(img_like_A)
-        img_B = self._load_image(img_like_B)
-
-        img_A_lr = F.interpolate(
-            img_A,
-            size=(self.H_lr, self.W_lr),
-            mode="bicubic",
-            align_corners=False,
-            antialias=True,
-        )
-        img_B_lr = F.interpolate(
-            img_B,
+        img: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        img_lr = F.interpolate(
+            img,
             size=(self.H_lr, self.W_lr),
             mode="bicubic",
             align_corners=False,
             antialias=True,
         )
         if self.H_hr is not None and self.W_hr is not None:
-            img_A_hr = F.interpolate(
-                img_A,
-                size=(self.H_hr, self.W_hr),
-                mode="bicubic",
-                align_corners=False,
-                antialias=True,
-            )
-            img_B_hr = F.interpolate(
-                img_B,
+            img_hr = F.interpolate(
+                img,
                 size=(self.H_hr, self.W_hr),
                 mode="bicubic",
                 align_corners=False,
                 antialias=True,
             )
         else:
-            img_A_hr = None
-            img_B_hr = None
+            img_hr = None
+        return img_lr, img_hr
 
-        preds = self(img_A_lr, img_B_lr, img_A_hr=img_A_hr, img_B_hr=img_B_hr)
-        
+    @torch.inference_mode()
+    def _match_core(
+        self,
+        f_list_A: list[torch.Tensor],
+        img_A_lr: torch.Tensor,
+        img_B_lr: torch.Tensor,
+        img_A_hr: torch.Tensor | None = None,
+        img_B_hr: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        preds = self._forward_from_features(
+            f_list_A=f_list_A,
+            img_A_lr=img_A_lr,
+            img_B_lr=img_B_lr,
+            img_A_hr=img_A_hr,
+            img_B_hr=img_B_hr,
+        )
+
         warp_AB = preds["warp_AB"]
         confidence_AB = preds["confidence_AB"]
         warp_BA = preds["warp_BA"]
@@ -356,17 +367,65 @@ class RoMaV2(nn.Module):
             overlap_BA = None
             precision_BA = None
 
-        preds = {
-            "warp_AB": warp_AB.clone(),
-            "confidence_AB": confidence_AB.clone(),
-            "overlap_AB": overlap_AB.clone(),
-            "precision_AB": precision_AB.clone(),
-            "warp_BA": warp_BA.clone() if warp_BA is not None else None,
-            "confidence_BA": confidence_BA.clone() if confidence_BA is not None else None,
-            "overlap_BA": overlap_BA.clone() if overlap_BA is not None else None,
-            "precision_BA": precision_BA.clone() if precision_BA is not None else None,
+        return {
+            "warp_AB": warp_AB,
+            "confidence_AB": confidence_AB,
+            "overlap_AB": overlap_AB,
+            "precision_AB": precision_AB,
+            "warp_BA": warp_BA,
+            "confidence_BA": confidence_BA,
+            "overlap_BA": overlap_BA,
+            "precision_BA": precision_BA,
         }
-        return preds
+
+    @torch.inference_mode()
+    def match(
+        self,
+        img_like_A: ImageLike,
+        img_like_B: ImageLike,
+    ) -> dict[str, torch.Tensor]:
+        self.eval()
+        img_A = self._load_image(img_like_A)
+        img_B = self._load_image(img_like_B)
+
+        img_A_lr, img_A_hr = self._resize_match_image(img_A)
+        img_B_lr, img_B_hr = self._resize_match_image(img_B)
+
+        f_list_A = self.f(img_A_lr)
+        return self._match_core(
+            f_list_A=f_list_A,
+            img_A_lr=img_A_lr,
+            img_B_lr=img_B_lr,
+            img_A_hr=img_A_hr,
+            img_B_hr=img_B_hr,
+        )
+
+    @torch.inference_mode()
+    def match_from_features(
+        self,
+        f_list_A: list[torch.Tensor],
+        img_A_lr: torch.Tensor,
+        imB: Image.Image,
+        img_A_hr: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        self.eval()
+        img_B = self._load_image(imB)
+        img_B_lr, img_B_hr = self._resize_match_image(img_B)
+        if self.H_hr is not None and self.W_hr is not None:
+            if img_A_hr is None:
+                raise ValueError(
+                    "img_A_hr must be provided when HR refinement is enabled. "
+                    "Cache img_A_hr from the original reference image."
+                )
+        else:
+            img_A_hr = None
+        return self._match_core(
+            f_list_A=f_list_A,
+            img_A_lr=img_A_lr,
+            img_B_lr=img_B_lr,
+            img_A_hr=img_A_hr,
+            img_B_hr=img_B_hr,
+        )
 
     def sample(self, preds: dict[str, torch.Tensor], num_corresp: int):
         warp = preds["warp_AB"]

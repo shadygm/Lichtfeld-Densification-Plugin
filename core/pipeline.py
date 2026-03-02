@@ -809,13 +809,13 @@ def run_dense_pipeline(
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model_cached = has_cached_romav2_weights()
         _report_model_setup_status(progress_callback, model_cached)
-        matcher = RomaMatcher(device=device, mode="outdoor", setting=config.roma_setting)
         if not model_cached and progress_callback is not None:
             progress_callback(10.0, "RoMa v2 model installation complete. Starting matching...")
         if torch.cuda.is_available():
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
             torch.backends.cudnn.benchmark = True
+        matcher = RomaMatcher(device=device, mode="outdoor", setting=config.roma_setting)
         _raise_if_cancelled(cancel_requested)
 
         total_refs = len(refs_local)
