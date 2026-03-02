@@ -98,8 +98,10 @@ class RomaMatcher:
     def match_grids_batch(self, imA: Image.Image, imB_list: List[Image.Image]):
         """Match a reference image against a list of neighbors.
 
-        Backbone features and refiner features for *imA* are extracted once
-        and reused for every neighbor, avoiding redundant GPU work.
+        All N neighbor pairs are processed in a single batched forward pass
+        through the ViT backbone, cross-attention matcher, DPT head, and
+        refiners.  Reference-A features are extracted once (batch=1) and
+        expanded to batch=N for the joint computation.
         """
         if not imB_list:
             return []
@@ -107,8 +109,9 @@ class RomaMatcher:
             raise RuntimeError("RoMaV2 model has been released; create a new matcher.")
         torch.set_float32_matmul_precision("highest")
         model = self.model
+        N = len(imB_list)
 
-        # --- reference image: preprocess once ---------------------------------
+        # --- reference image A: preprocess once --------------------------------
         img_A = self._prepare_image(imA)
         img_A_lr = torch_F.interpolate(
             img_A, size=(model.H_lr, model.W_lr),
@@ -123,113 +126,122 @@ class RomaMatcher:
             if has_hr else None
         )
 
-        # Backbone features for A (the expensive ViT pass) — computed once.
+        # Backbone features for A — single ViT pass (batch=1).
         f_A = model.f(img_A_lr)
 
-        # Refiner (VGG) features for A at each resolution stage — computed once.
+        # Refiner (VGG) features for A at each resolution stage.
         refiner_feats_A = [None, None]  # [lr_stage, hr_stage]
         stage_imgs_A = [img_A_lr, img_A_hr]
         for idx, sA in enumerate(stage_imgs_A):
             if sA is not None:
                 refiner_feats_A[idx] = model.refiner_features(sA)
 
-        # --- per-neighbor matching --------------------------------------------
-        results: List[Tuple[torch.Tensor, torch.Tensor]] = []
-        for imB in imB_list:
-            img_B = self._prepare_image(imB)
-            img_B_lr = torch_F.interpolate(
-                img_B, size=(model.H_lr, model.W_lr),
+        # --- all neighbor images: batched preprocess + feature extraction ------
+        all_B = torch.cat(
+            [self._prepare_image(imB) for imB in imB_list], dim=0,
+        )  # (N, 3, H_orig, W_orig)
+        all_B_lr = torch_F.interpolate(
+            all_B, size=(model.H_lr, model.W_lr),
+            mode="bicubic", align_corners=False, antialias=True,
+        )  # (N, 3, H_lr, W_lr)
+        all_B_hr = (
+            torch_F.interpolate(
+                all_B, size=(model.H_hr, model.W_hr),
                 mode="bicubic", align_corners=False, antialias=True,
             )
-            img_B_hr = (
-                torch_F.interpolate(
-                    img_B, size=(model.H_hr, model.W_hr),
-                    mode="bicubic", align_corners=False, antialias=True,
-                )
-                if has_hr else None
+            if has_hr else None
+        )  # (N, 3, H_hr, W_hr) | None
+        del all_B  # free full-res neighbor tensors
+
+        # Batched ViT backbone for all N neighbors — single forward pass.
+        all_f_B = model.f(all_B_lr)  # list of (N, H, W, D)
+
+        # Batched VGG refiner features for all neighbors at each stage.
+        all_refiner_B = [None, None]
+        all_refiner_B[0] = model.refiner_features(all_B_lr)
+        if all_B_hr is not None:
+            all_refiner_B[1] = model.refiner_features(all_B_hr)
+
+        # --- batched cross-attention matching (all N pairs at once) ------------
+        # Expand A features from batch=1 → batch=N.  The shallow list copy
+        # protects against _compute_head_preds replacing the last element.
+        f_A_N = [f.expand(N, -1, -1, -1) for f in f_A]
+        f_A_N_copy = list(f_A_N)
+        img_A_lr_N = img_A_lr.expand(N, -1, -1, -1)
+
+        matcher_out = model.matcher(
+            f_A_N_copy, all_f_B,
+            img_A=img_A_lr_N, img_B=all_B_lr,
+            bidirectional=model.bidirectional,
+        )
+        warp_AB = matcher_out["warp_AB"]            # (N, H, W, 2)
+        confidence_AB = matcher_out["confidence_AB"]  # (N, H, W, C)
+        warp_BA = matcher_out.get("warp_BA")
+        confidence_BA = matcher_out.get("confidence_BA")
+
+        # --- batched refinement stages ----------------------------------------
+        stage_imgs_B = [all_B_lr, all_B_hr]
+        for stage, (sA, sB) in enumerate(zip(stage_imgs_A, stage_imgs_B)):
+            if sA is None or sB is None:
+                continue
+            _, _, Hs, Ws = sA.shape
+            scale_factor = torch.tensor(
+                (Ws / model.anchor_width, Hs / model.anchor_height),
+                device=self.device,
             )
+            cached_A = refiner_feats_A[stage]   # {ps: (1, H, W, C)}
+            ref_feats_B = all_refiner_B[stage]  # {ps: (N, H, W, C)}
 
-            # Backbone features for B (unique per neighbor).
-            f_B = model.f(img_B_lr)
-
-            # Shallow-copy f_A: the matcher's head mutates f_list_A[-1].
-            f_A_copy = list(f_A)
-
-            # Cross-attention matching.
-            matcher_out = model.matcher(
-                f_A_copy, f_B,
-                img_A=img_A_lr, img_B=img_B_lr,
-                bidirectional=model.bidirectional,
-            )
-            warp_AB = matcher_out["warp_AB"]
-            confidence_AB = matcher_out["confidence_AB"]
-            warp_BA = matcher_out.get("warp_BA")
-            confidence_BA = matcher_out.get("confidence_BA")
-
-            # Refinement stages (lr, then optionally hr).
-            stage_imgs_B = [img_B_lr, img_B_hr]
-            for stage, (sA, sB) in enumerate(zip(stage_imgs_A, stage_imgs_B)):
-                if sA is None or sB is None:
-                    continue
-                _, _, Hs, Ws = sA.shape
-                scale_factor = torch.tensor(
-                    (Ws / model.anchor_width, Hs / model.anchor_height),
-                    device=self.device,
+            for ps_str, refiner in model.refiners.items():
+                ps = int(ps_str)
+                zero_out = has_hr and ps == 4 and stage == 1
+                warp_AB, confidence_AB = _interpolate_warp_and_confidence(
+                    warp=warp_AB, confidence=confidence_AB,
+                    H=Hs, W=Ws, patch_size=ps,
+                    zero_out_precision=zero_out,
                 )
-                cached_A = refiner_feats_A[stage]
-                ref_feats_B = model.refiner_features(sB)
-
-                for ps_str, refiner in model.refiners.items():
-                    ps = int(ps_str)
-                    zero_out = has_hr and ps == 4 and stage == 1
-                    warp_AB, confidence_AB = _interpolate_warp_and_confidence(
-                        warp=warp_AB, confidence=confidence_AB,
+                if model.bidirectional and warp_BA is not None:
+                    warp_BA, confidence_BA = _interpolate_warp_and_confidence(
+                        warp=warp_BA, confidence=confidence_BA,
                         H=Hs, W=Ws, patch_size=ps,
                         zero_out_precision=zero_out,
                     )
-                    if model.bidirectional and warp_BA is not None:
-                        warp_BA, confidence_BA = _interpolate_warp_and_confidence(
-                            warp=warp_BA, confidence=confidence_BA,
-                            H=Hs, W=Ws, patch_size=ps,
-                            zero_out_precision=zero_out,
-                        )
 
-                    fp_A = cached_A[ps]
-                    fp_B = ref_feats_B[ps]
-                    out_AB = refiner(
-                        f_A=fp_A, f_B=fp_B,
-                        prev_warp=warp_AB,
-                        prev_confidence=confidence_AB,
+                fp_A = cached_A[ps].expand(N, -1, -1, -1)  # (1→N)
+                fp_B = ref_feats_B[ps]                      # (N, ...)
+                out_AB = refiner(
+                    f_A=fp_A, f_B=fp_B,
+                    prev_warp=warp_AB,
+                    prev_confidence=confidence_AB,
+                    scale_factor=scale_factor,
+                )
+                warp_AB = out_AB["warp"]
+                confidence_AB = out_AB["confidence"]
+                if model.bidirectional and warp_BA is not None:
+                    out_BA = refiner(
+                        f_A=fp_B, f_B=fp_A,
+                        prev_warp=warp_BA,
+                        prev_confidence=confidence_BA,
                         scale_factor=scale_factor,
                     )
-                    warp_AB = out_AB["warp"]
-                    confidence_AB = out_AB["confidence"]
-                    if model.bidirectional and warp_BA is not None:
-                        out_BA = refiner(
-                            f_A=fp_B, f_B=fp_A,
-                            prev_warp=warp_BA,
-                            prev_confidence=confidence_BA,
-                            scale_factor=scale_factor,
-                        )
-                        warp_BA = out_BA["warp"]
-                        confidence_BA = out_BA["confidence"]
+                    warp_BA = out_BA["warp"]
+                    confidence_BA = out_BA["confidence"]
 
-            # Map raw confidence → overlap (sigmoid), matching model.match().
-            overlap = confidence_AB[..., :1].sigmoid()
-            if model.threshold is not None:
-                overlap[overlap > model.threshold] = 1.0
-            overlap = overlap[0].squeeze(-1)  # (H_out, W_out)
-            warp_AB_final = warp_AB[0]  # (H_out, W_out, 2)
+        # --- split batched results per neighbor --------------------------------
+        overlap = confidence_AB[..., :1].sigmoid()  # (N, H, W, 1)
+        if model.threshold is not None:
+            overlap[overlap > model.threshold] = 1.0
 
-            # Build the reference-side grid at the *output* resolution (which
-            # equals lr when there is no hr stage, or hr/patch_size otherwise).
-            H_out, W_out = overlap.shape
-            yy = torch.linspace(-1 + 1 / H_out, 1 - 1 / H_out, H_out, device=self.device)
-            xx = torch.linspace(-1 + 1 / W_out, 1 - 1 / W_out, W_out, device=self.device)
-            yy, xx = torch.meshgrid(yy, xx, indexing="ij")
-            gridA = torch.stack([xx, yy], dim=-1)
+        H_out, W_out = overlap.shape[1], overlap.shape[2]
+        yy = torch.linspace(-1 + 1 / H_out, 1 - 1 / H_out, H_out, device=self.device)
+        xx = torch.linspace(-1 + 1 / W_out, 1 - 1 / W_out, W_out, device=self.device)
+        yy, xx = torch.meshgrid(yy, xx, indexing="ij")
+        gridA = torch.stack([xx, yy], dim=-1)  # shared (H, W, 2)
 
-            warp = torch.cat([gridA, warp_AB_final], dim=-1)
-            results.append((warp.contiguous(), overlap.contiguous()))
+        results: List[Tuple[torch.Tensor, torch.Tensor]] = []
+        for i in range(N):
+            ov = overlap[i].squeeze(-1)                    # (H, W)
+            warp = torch.cat([gridA, warp_AB[i]], dim=-1)  # (H, W, 4)
+            results.append((warp.contiguous(), ov.contiguous()))
 
         return results
