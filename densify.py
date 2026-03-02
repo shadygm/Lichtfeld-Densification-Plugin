@@ -354,13 +354,13 @@ def build_argparser():
         "--prefetch_packages",
         type=int,
         default=8,
-        help="Approximate total reference packages prefetched by DataLoader workers",
+        help="Approximate total reference packages prefetched by threaded pack workers",
     )
     ap.add_argument(
         "--pack_workers",
         type=int,
         default=4,
-        help="Number of DataLoader workers packing reference packages",
+        help="Number of threads used to pack reference packages",
     )
     ap.add_argument("--seed", type=int, default=0, help="Random seed")
     return ap
