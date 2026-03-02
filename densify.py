@@ -23,13 +23,14 @@ _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from core.camera_models import CameraRecord
-from core.config import DensePipelineConfig
-from core.geometry import K_from_camera, P_from_KRt, cam_center_world, pose_world2cam
-from core.image_utils import find_image, image_dir, to_uint8_rgb
-from core.pipeline import run_dense_pipeline
-from core.selection import nearest_neighbors, select_cameras_by_visibility, select_cameras_kcenters
-from core.writers import write_ply, write_points3D_bin
+from .core.camera_models import CameraRecord
+from .core.config import DensePipelineConfig
+from .core.geometry import K_from_camera, P_from_KRt, cam_center_world, pose_world2cam
+from .core.image_utils import find_image, image_dir, to_uint8_rgb
+from .core.pipeline import PipelineCancelled, run_dense_pipeline
+from .core.selection import nearest_neighbors, select_cameras_by_visibility, select_cameras_kcenters
+from .core.writers import write_ply, write_points3D_bin
+
 
 
 def load_reconstruction(sparse_dir: str):
@@ -110,10 +111,21 @@ def _write_output(path: str, xyz: np.ndarray, rgb: np.ndarray, err: np.ndarray) 
         write_points3D_bin(path, xyz, rgb_uint8, err)
 
 
+def _cancel_requested(cancel_requested: Optional[Callable[[], bool]]) -> bool:
+    if cancel_requested is None:
+        return False
+    try:
+        return bool(cancel_requested())
+    except Exception as exc:
+        lf.log.warn(f"Cancellation callback failed: {exc}")
+        return False
+
+
 def dense_init(
     args,
     progress_callback: Optional[Callable[[float, str], None]] = None,
     debug_state=None,
+    cancel_requested: Optional[Callable[[], bool]] = None,
 ) -> int:
     np.random.seed(args.seed)
     scene_root = os.path.abspath(args.scene_root)
@@ -146,15 +158,25 @@ def dense_init(
         pack_workers=args.pack_workers,
     )
 
-    result = run_dense_pipeline(
-        records,
-        refs_local,
-        nn_table,
-        config,
-        progress_callback=progress_callback,
-        on_sequential_viz=None,
-        debug_state=debug_state,
-    )
+    try:
+        result = run_dense_pipeline(
+            records,
+            refs_local,
+            nn_table,
+            config,
+            progress_callback=progress_callback,
+            on_sequential_viz=None,
+            debug_state=debug_state,
+            cancel_requested=cancel_requested,
+        )
+    except PipelineCancelled:
+        if progress_callback:
+            progress_callback(0.0, "Cancelled")
+        return 2
+    if _cancel_requested(cancel_requested):
+        if progress_callback:
+            progress_callback(0.0, "Cancelled")
+        return 2
 
     xyz, rgb, err = _apply_point_cap(result.xyz, result.rgb, result.err, args.max_points, args.seed)
     if progress_callback:
@@ -164,6 +186,8 @@ def dense_init(
     if progress_callback:
         progress_callback(100.0, f"Done! {xyz.shape[0]:,} points")
     return 0
+
+
 def extract_cameras_from_lfs(camera_nodes) -> List[CameraRecord]:
     records: List[CameraRecord] = []
     for node in camera_nodes:
@@ -203,6 +227,7 @@ def dense_init_from_lfs(
     progress_callback: Optional[Callable[[float, str], None]] = None,
     on_sequential_viz: Optional[Callable[[str], None]] = None,
     debug_state=None,
+    cancel_requested: Optional[Callable[[], bool]] = None,
 ) -> Tuple[int, Optional[str]]:
     np.random.seed(config.seed)
     if progress_callback:
@@ -228,9 +253,14 @@ def dense_init_from_lfs(
             progress_callback=progress_callback,
             on_sequential_viz=on_sequential_viz,
             debug_state=debug_state,
+            cancel_requested=cancel_requested,
         )
+    except PipelineCancelled:
+        return 2, "Cancelled"
     except RuntimeError as exc:
         return 1, str(exc)
+    if _cancel_requested(cancel_requested):
+        return 2, "Cancelled"
 
     xyz, rgb, err = _apply_point_cap(result.xyz, result.rgb, result.err, config.max_points, config.seed)
     if progress_callback:

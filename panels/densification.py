@@ -12,10 +12,11 @@ import random
 import tempfile
 import threading
 import time
+import weakref
 import zlib
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Callable, Optional, List
+from typing import Callable, Optional, List, ClassVar
 
 import numpy as np
 from PIL import Image
@@ -57,6 +58,8 @@ class DensifyJob:
     
     Uses cameras from LichtFeld Studio directly - no file paths needed.
     """
+    _instances: ClassVar[weakref.WeakSet["DensifyJob"]] = weakref.WeakSet()
+    _instances_lock: ClassVar[threading.Lock] = threading.Lock()
 
     def __init__(
         self,
@@ -81,6 +84,30 @@ class DensifyJob:
         self._result: Optional[DensifyResult] = None
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+
+        with self._instances_lock:
+            self._instances.add(self)
+
+    @classmethod
+    def cancel_all(cls, timeout: float = 5.0):
+        with cls._instances_lock:
+            jobs = list(cls._instances)
+
+        for job in jobs:
+            try:
+                job.cancel()
+            except Exception:
+                pass
+
+        deadline = time.time() + max(0.0, float(timeout))
+        for job in jobs:
+            remaining = deadline - time.time()
+            if remaining <= 0.0:
+                break
+            try:
+                job.wait(timeout=remaining)
+            except Exception:
+                pass
 
     @property
     def stage(self) -> DensifyStage:
@@ -113,6 +140,7 @@ class DensifyJob:
     def cancel(self):
         with self._lock:
             self._cancelled = True
+            self._status = "Cancelling..."
             if self.debug_state:
                 self.debug_state.release_waiters()
 
@@ -185,7 +213,14 @@ class DensifyJob:
                 progress_callback=progress_cb,
                 on_sequential_viz=self.on_sequential_viz,
                 debug_state=self.debug_state,
+                cancel_requested=check_cancelled,
             )
+
+            if result_code == 2 or check_cancelled():
+                with self._lock:
+                    self._result = DensifyResult(success=False, error="Cancelled")
+                self._update(DensifyStage.CANCELLED, self._progress, "Cancelled")
+                return
 
             if result_code != 0:
                 raise RuntimeError(result_info or "Densification failed")

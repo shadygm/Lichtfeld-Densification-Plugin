@@ -44,6 +44,11 @@ def on_load():
 
 def on_unload():
     """Called when plugin unloads."""
+    try:
+        DensifyJob.cancel_all(timeout=5.0)
+    except Exception as exc:
+        lf.log.warn(f"Failed to cancel active densification jobs on unload: {exc}")
+
     for cls in reversed(_classes):
         lf.unregister_class(cls)
     lf.log.info("Dense Initialization plugin unloaded")

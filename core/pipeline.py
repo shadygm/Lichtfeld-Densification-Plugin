@@ -43,6 +43,11 @@ class PipelineResult:
     elapsed_seconds: float
     pairs_processed: int
 
+
+class PipelineCancelled(RuntimeError):
+    """Raised when a running dense pipeline is cancelled."""
+
+
 _PREVIEW_MAX_MATCHES = 10000
 
 
@@ -188,6 +193,48 @@ class _PackedReferenceDataset(Dataset):
 def _single_item_collate(batch: List[Optional[_PackedReferenceBatch]]) -> Optional[_PackedReferenceBatch]:
     """Identity collate for batch_size=1 DataLoader."""
     return batch[0] if batch else None
+
+
+def _is_cancelled(cancel_requested: Optional[Callable[[], bool]]) -> bool:
+    if cancel_requested is None:
+        return False
+    try:
+        return bool(cancel_requested())
+    except Exception as exc:
+        lf.log.warn(f"Cancellation callback failed: {exc}")
+        return False
+
+
+def _shutdown_loader_workers(loader: Optional[DataLoader], iterator) -> None:
+    """Best-effort shutdown for DataLoader workers (including persistent workers)."""
+
+    shutdown_errors: List[Exception] = []
+    iter_candidates = [iterator]
+
+    if loader is not None:
+        iter_from_loader = getattr(loader, "_iterator", None)
+        if iter_from_loader is not None:
+            iter_candidates.append(iter_from_loader)
+
+    for candidate in iter_candidates:
+        if candidate is None:
+            continue
+        shutdown_fn = getattr(candidate, "_shutdown_workers", None)
+        if not callable(shutdown_fn):
+            continue
+        try:
+            shutdown_fn()
+        except Exception as exc:
+            shutdown_errors.append(exc)
+
+    if loader is not None and hasattr(loader, "_iterator"):
+        try:
+            loader._iterator = None
+        except Exception:
+            pass
+
+    if shutdown_errors:
+        lf.log.warn(f"DataLoader worker shutdown raised {len(shutdown_errors)} error(s)")
 
 
 def _build_filtered_match_preview(
@@ -419,6 +466,7 @@ def run_dense_pipeline(
     progress_callback: Optional[Callable[[float, str], None]] = None,
     on_sequential_viz: Optional[Callable[[str], None]] = None,
     debug_state: Optional[MatchDebugState] = None,
+    cancel_requested: Optional[Callable[[], bool]] = None,
 ) -> PipelineResult:
     np.random.seed(config.seed)
 
@@ -454,6 +502,8 @@ def run_dense_pipeline(
     pair_counter = 0
     t0 = time.time()
     matcher = None
+    pack_loader = None
+    pack_loader_iter = None
 
     try:
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -462,6 +512,8 @@ def run_dense_pipeline(
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
             torch.backends.cudnn.benchmark = True
+        if _is_cancelled(cancel_requested):
+            raise PipelineCancelled("Cancelled")
 
         total_refs = len(refs_local)
         w_match, h_match = matcher.w_resized, matcher.h_resized
@@ -497,9 +549,17 @@ def run_dense_pipeline(
         if "in_order" in DataLoader.__init__.__code__.co_varnames:
             loader_kwargs["in_order"] = False
         pack_loader = DataLoader(**loader_kwargs)
+        pack_loader_iter = iter(pack_loader)
 
         refs_consumed = 0
-        for packed in pack_loader:
+        while True:
+            if _is_cancelled(cancel_requested):
+                raise PipelineCancelled("Cancelled")
+            try:
+                packed = next(pack_loader_iter)
+            except StopIteration:
+                break
+
             refs_consumed += 1
 
             if progress_callback:
@@ -511,6 +571,8 @@ def run_dense_pipeline(
 
             if packed is None:
                 continue
+            if _is_cancelled(cancel_requested):
+                raise PipelineCancelled("Cancelled")
 
             ref_id = packed.ref_id
             ref_path = packed.ref_path
@@ -531,11 +593,15 @@ def run_dense_pipeline(
             image_by_nbr: Dict[int, np.ndarray] = {}
 
             batch_results = matcher.match_grids_batch(imA, nn_images)
+            if _is_cancelled(cancel_requested):
+                raise PipelineCancelled("Cancelled")
             maskA_t = None
             if maskA_np is not None:
                 maskA_t = torch.from_numpy(maskA_np.astype(np.float32))
 
             for (warp_hw, cert_hw), maskB_np, nbr_id, imB_np in zip(batch_results, nn_masks, nn_ids, nn_arrays):
+                if _is_cancelled(cancel_requested):
+                    raise PipelineCancelled("Cancelled")
                 cert_hw = torch.clamp(cert_hw, min=config.certainty_thresh)
 
                 if maskA_t is not None:
@@ -613,6 +679,8 @@ def run_dense_pipeline(
             if collect_debug_matches:
                 total_pairs_val = total_pairs_est if total_pairs_est > 0 else max(pair_counter, 1)
                 for nbr_id, matches in debug_matches_by_nbr.items():
+                    if _is_cancelled(cancel_requested):
+                        raise PipelineCancelled("Cancelled")
                     imB_np = image_by_nbr.get(nbr_id)
                     pair_idx = pair_index_by_nbr.get(nbr_id)
                     cert_norm = debug_cert_by_nbr.get(nbr_id)
@@ -650,6 +718,8 @@ def run_dense_pipeline(
                 and pairs_processed % viz_interval == 0
                 and intermediate_ply_base
             ):
+                if _is_cancelled(cancel_requested):
+                    raise PipelineCancelled("Cancelled")
                 try:
                     xyz_so_far = np.concatenate(all_xyz, axis=0)
                     rgb_so_far = np.concatenate(all_rgb, axis=0)
@@ -663,6 +733,7 @@ def run_dense_pipeline(
                     lf.log.warn(f"Failed to emit intermediate PLY: {exc}")
 
     finally:
+        _shutdown_loader_workers(pack_loader, pack_loader_iter)
         if matcher is not None:
             try:
                 matcher.close()
@@ -673,12 +744,14 @@ def run_dense_pipeline(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
+        if debug_state:
+            debug_state.release_waiters()
+
+    if _is_cancelled(cancel_requested):
+        raise PipelineCancelled("Cancelled")
 
     if progress_callback:
         progress_callback(90.0, "Finalizing triangulation...")
-
-    if debug_state:
-        debug_state.release_waiters()
 
     if not all_xyz:
         raise RuntimeError("No points triangulated. Try adjusting parameters.")
