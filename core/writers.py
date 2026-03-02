@@ -16,7 +16,7 @@ def write_points3D_bin(path_out: str, xyz: np.ndarray, rgb_uint8: np.ndarray,
                         errors: Optional[np.ndarray] = None) -> None:
     N = xyz.shape[0]
     if errors is None:
-        errors = np.zeros((N,), dtype=np.float64)
+        errors = np.zeros((N,), dtype=np.float32)
     with open(path_out, "wb") as f:
         f.write(struct.pack("<Q", N))
         for i in range(N):

@@ -8,9 +8,9 @@ import pycolmap
 
 
 def K_from_camera(cam: pycolmap.Camera) -> np.ndarray:
-    K = np.eye(3, dtype=np.float64)
+    K = np.eye(3, dtype=np.float32)
     model = str(cam.model.name).upper()
-    p = np.asarray(cam.params, dtype=np.float64)
+    p = np.asarray(cam.params, dtype=np.float32)
     w, h = cam.width, cam.height
     if "PINHOLE" in model and "SIMPLE" not in model:
         fx, fy, cx, cy = p[0], p[1], p[2], p[3]
@@ -34,11 +34,11 @@ def pose_world2cam(im: pycolmap.Image) -> Tuple[np.ndarray, np.ndarray]:
     if hasattr(im, "cam_from_world"):
         cfw = im.cam_from_world
         cfw = cfw() if callable(cfw) else cfw
-        R = np.asarray(cfw.rotation.matrix(), dtype=np.float64)
-        t = np.asarray(cfw.translation, dtype=np.float64).reshape(3, 1)
+        R = np.asarray(cfw.rotation.matrix(), dtype=np.float32)
+        t = np.asarray(cfw.translation, dtype=np.float32).reshape(3, 1)
     else:
         R = im.qvec.to_rotation_matrix()
-        t = np.asarray(im.tvec, dtype=np.float64).reshape(3, 1)
+        t = np.asarray(im.tvec, dtype=np.float32).reshape(3, 1)
     return R, t
 
 
@@ -52,37 +52,56 @@ def cam_center_world(R: np.ndarray, t: np.ndarray) -> np.ndarray:
 
 def skew(v: np.ndarray) -> np.ndarray:
     vx, vy, vz = v.flatten()
-    return np.array([[0, -vz, vy], [vz, 0, -vx], [-vy, vx, 0]], dtype=np.float64)
+    return np.array([[0, -vz, vy], [vz, 0, -vx], [-vy, vx, 0]], dtype=np.float32)
 
 
-def dlt_triangulate_batch(P1: np.ndarray, P2: np.ndarray, uv1: np.ndarray, uv2: np.ndarray) -> np.ndarray:
+def dlt_triangulate_batch(P1, P2, uv1, uv2):
     N = uv1.shape[0]
-    X = np.zeros((N, 4), dtype=np.float64)
+    if N == 0:
+        return np.zeros((0,4), dtype=np.float32)
+
     p10, p11, p12 = P1[0], P1[1], P1[2]
     p20, p21, p22 = P2[0], P2[1], P2[2]
-    for i in range(N):
-        u1, v1 = uv1[i]
-        u2, v2 = uv2[i]
-        A = np.stack([
-            u1 * p12 - p10,
-            v1 * p12 - p11,
-            u2 * p22 - p20,
-            v2 * p22 - p21,
-        ], axis=0)
-        _, _, Vt = np.linalg.svd(A)
+
+    u1 = uv1[:, 0:1]
+    v1 = uv1[:, 1:2]
+    u2 = uv2[:, 0:1]
+    v2 = uv2[:, 1:2]
+
+    A = np.empty((N,4,4), dtype=np.float32)
+    A[:,0,:] = u1 * p12 - p10
+    A[:,1,:] = v1 * p12 - p11
+    A[:,2,:] = u2 * p22 - p20
+    A[:,3,:] = v2 * p22 - p21
+
+    if N == 1:
+        # Avoid batch SVD collapse
+        _, _, Vt = np.linalg.svd(A[0])
         Xh = Vt[-1]
-        if abs(Xh[3]) < 1e-12:
-            Xh[3] = 1e-12
-        X[i] = Xh / Xh[3]
-    return X
+        w = Xh[3] if abs(Xh[3]) > 1e-12 else 1e-12
+        return (Xh / w)[None, :]
+
+    _, _, Vt = np.linalg.svd(A)
+    Xh = Vt[:, -1, :]
+    w = np.where(np.abs(Xh[:,3:4]) < 1e-12, 1e-12, Xh[:,3:4])
+    return Xh / w
+    
 
 
 def reprojection_errors(P: np.ndarray, X: np.ndarray, uv: np.ndarray) -> np.ndarray:
-    Xh = X.T
-    proj = P @ Xh
-    proj = proj / np.maximum(1e-12, proj[2:3, :])
-    pred = proj[:2, :].T
-    return np.linalg.norm(pred - uv, axis=1)
+    # Project: (N,4) @ (4,3) -> (N,3)
+    proj = X @ P.T
+
+    # Normalize by depth
+    z = np.maximum(proj[:, 2], 1e-12)
+    u_pred = proj[:, 0] / z
+    v_pred = proj[:, 1] / z
+
+    # Reprojection residuals
+    du = u_pred - uv[:, 0]
+    dv = v_pred - uv[:, 1]
+
+    return np.sqrt(du * du + dv * dv)
 
 
 def cheirality_mask(P: np.ndarray, X: np.ndarray) -> np.ndarray:

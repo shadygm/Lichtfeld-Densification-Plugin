@@ -381,6 +381,8 @@ def _collect_reference_matches(
         maskA_t = torch.from_numpy(packed.maskA_np.astype(np.float32))
 
     for (warp_hw, cert_hw), maskB_np, nbr_id, imB_np in zip(batch_results, packed.nn_masks, packed.nn_ids, packed.nn_arrays):
+        print("warp_hw:", warp_hw.shape)
+        print("cert_hw:", cert_hw.shape)
         _raise_if_cancelled(cancel_requested)
         cert_hw = torch.clamp(cert_hw, min=config.certainty_thresh)
 
@@ -724,9 +726,9 @@ def _triangulate_ref(
             if not np.any(keep):
                 continue
 
-        Xw = Xi[keep][:, :3].astype(np.float64)
+        Xw = Xi[keep][:, :3].astype(np.float32)
         col = rgb_ref[idxs][keep].astype(np.float32)
-        e = err[keep].astype(np.float64)
+        e = err[keep].astype(np.float32)
 
         job_xyz.append(Xw)
         job_rgb.append(col)

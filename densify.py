@@ -193,9 +193,9 @@ def extract_cameras_from_lfs(camera_nodes) -> List[CameraRecord]:
         fy = node.camera_focal_y
         cx = width / 2.0
         cy = height / 2.0
-        K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float64)
-        R = np.asarray(node.camera_R, dtype=np.float64)
-        t = np.asarray(node.camera_T, dtype=np.float64).reshape(3, 1)
+        K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float32)
+        R = np.asarray(node.camera_R, dtype=np.float32)
+        t = np.asarray(node.camera_T, dtype=np.float32).reshape(3, 1)
         P = K @ np.concatenate([R, t], axis=1)
         C = (-R.T @ t).reshape(3)
         records.append(
