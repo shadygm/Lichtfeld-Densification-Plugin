@@ -1,22 +1,25 @@
 # Dense Initialization Plugin for LichtFeld Studio
+![2026-03-0223-47-26-ezgif com-video-to-gif-converter](https://github.com/user-attachments/assets/6bf3aa4d-7022-4813-b72b-f9d7f931c5a7)
 
-A densification preprocessing plugin in LichtFeld Studio. This tool performs densification pass on sparse reconstructions to create dense point clouds.
+A densification preprocessing plugin for LichtFeld Studio. It performs a densification pass on sparse reconstructions to generate dense point clouds using RoMa v2 matching.
 
-Based on [bounty #2](https://github.com/MrNeRF/LichtFeld-Studio/pull/413), with an upgrade to RoMaV2.
+_Based on [bounty #2](https://github.com/MrNeRF/LichtFeld-Studio/pull/413)._
 
 ## Features
 
-- **RoMaV2 Matching**: Upgraded dense matching for better accuracy.
-- **GUI Panel**: Easy-to-use interface with progress tracking and scene import.
+- **RoMa v2 Matching**
+- **Configurable Parameters via GUI**
+- **Live Reconstruction Updates**
+- **Scene Integration**
+- **Installable via LFS Plugin Marketplace**
 
 ## Installation
 
-### From GitHub (LichtFeld Studio v0.5+)
+### From GitHub (LichtFeld Studio Nightly)
 
 In LichtFeld Studio:
-1. Open the **Plugins** panel.
-2. Enter: `https://github.com/shadygm/lichtfeld-densification-plugin`
-3. Click **Install**.
+1. Open the **Plugins Marketplace** panel under "View" menu bar.
+2. Click **Install** on the `Lichtfeld-Densification-Plugin` card.
 
 ### Manual Installation
 
@@ -29,18 +32,19 @@ git clone https://github.com/shadygm/lichtfeld-densification-plugin.git ~/.licht
 ### GUI
 
 1. Open the **Dense Initialization** panel (side panel).
-2. Ensure a scene is loaded in LichtFeld Studio.
-3. Configure settings (e.g., RoMa quality, reference fraction, filtering thresholds).
+2. Ensure a scene is loaded in LichtFeld-Studio.
+3. Optional: Configure settings (e.g., RoMa quality, reference fraction, filtering thresholds).
 4. Click **Start Densification**.
-5. Monitor progress and click **Import to Scene** when complete.
-
+5. Monitor progress.
+6. To reuse the result, right-click the point cloud in the scene graph and select **Save to Disk**.
 
 ## Configuration
 
 ### RoMa Settings
 
-- `precise`: High quality, slow (H_lr=800, bidirectional).
-- `base`: Balanced (H_lr=640, no high-res).
+- `precise`: Highest quality, slow and VRAM heavy (H_lr=800, bidirectional).
+- `high`: High quality, (H_lr=64, bidirectional matching)
+- `base`: Balanced (H_lr=640).
 - `fast`: Default, fast (H_lr=512).
 - `turbo`: Fastest (H_lr=320).
 
