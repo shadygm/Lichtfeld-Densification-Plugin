@@ -11,13 +11,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import lichtfeld as lf
 import numpy as np
-
-# Guard sys.argv before importing pycolmap – see core/geometry.py for details.
-_saved_argv = sys.argv
-sys.argv = sys.argv[:1]
 import pycolmap
-sys.argv = _saved_argv
-del _saved_argv
 
 _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
