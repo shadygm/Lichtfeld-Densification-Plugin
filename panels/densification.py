@@ -642,10 +642,6 @@ class DensificationPanel(Panel):
             0.9,
         )
 
-
-
-
-
     def _start(self):
         if not self._has_training_data():
             lf.log.warn("No training cameras found in scene")

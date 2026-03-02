@@ -11,13 +11,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import lichtfeld as lf
 import numpy as np
-
-# Guard sys.argv before importing pycolmap – see core/geometry.py for details.
-_saved_argv = sys.argv
-sys.argv = sys.argv[:1]
 import pycolmap
-sys.argv = _saved_argv
-del _saved_argv
 
 _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
@@ -199,9 +193,9 @@ def extract_cameras_from_lfs(camera_nodes) -> List[CameraRecord]:
         fy = node.camera_focal_y
         cx = width / 2.0
         cy = height / 2.0
-        K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float64)
-        R = np.asarray(node.camera_R, dtype=np.float64)
-        t = np.asarray(node.camera_T, dtype=np.float64).reshape(3, 1)
+        K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float32)
+        R = np.asarray(node.camera_R, dtype=np.float32)
+        t = np.asarray(node.camera_T, dtype=np.float32).reshape(3, 1)
         P = K @ np.concatenate([R, t], axis=1)
         C = (-R.T @ t).reshape(3)
         records.append(
@@ -360,13 +354,13 @@ def build_argparser():
         "--prefetch_packages",
         type=int,
         default=8,
-        help="Approximate total reference packages prefetched by DataLoader workers",
+        help="Approximate total reference packages prefetched by threaded pack workers",
     )
     ap.add_argument(
         "--pack_workers",
         type=int,
         default=4,
-        help="Number of DataLoader workers packing reference packages",
+        help="Number of threads used to pack reference packages",
     )
     ap.add_argument("--seed", type=int, default=0, help="Random seed")
     return ap

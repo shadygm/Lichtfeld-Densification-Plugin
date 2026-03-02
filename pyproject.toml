@@ -31,5 +31,4 @@ torch = [{ index = "pytorch-cu128" }]
 torchvision = [{ index = "pytorch-cu128" }]
 
 [tool.lichtfeld]
-auto_start = true
 hot_reload = true

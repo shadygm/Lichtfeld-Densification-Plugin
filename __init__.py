@@ -6,17 +6,6 @@ Uses RoMa v2 to densify sparse COLMAP reconstructions with accurate,
 high-quality point clouds.
 """
 
-# ── Sanitize sys.argv before importing any C-extensions that link gflags/glog.
-# pycolmap embeds gflags which calls ParseCommandLineFlags(sys.argv) during
-# module init.  On Windows (where multiprocessing uses 'spawn') every DataLoader
-# worker re-imports all modules and re-triggers gflags parsing.  If the host app
-# set sys.argv to e.g. ['LichtFeld.exe', '-s', 'scene.lfs'], gflags fails with
-# "Parse error: Flag could not be matched: 's'".  Stripping everything after the
-# program name prevents this while keeping the program name intact.
-import sys as _sys
-_original_argv = _sys.argv
-_sys.argv = _sys.argv[:1]
-
 import lichtfeld as lf
 
 from .densify import dense_init
@@ -27,10 +16,6 @@ from .panels.densification import (
     DensifyJob,
     DensifyStage,
 )
-
-# Restore original argv now that gflags-bearing modules have been imported.
-_sys.argv = _original_argv
-del _original_argv
 
 _classes = [DensificationPanel]
 
