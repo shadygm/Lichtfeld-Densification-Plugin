@@ -67,24 +67,26 @@ def skew(v: np.ndarray) -> np.ndarray:
 
 def dlt_triangulate_batch(P1: np.ndarray, P2: np.ndarray, uv1: np.ndarray, uv2: np.ndarray) -> np.ndarray:
     N = uv1.shape[0]
-    X = np.zeros((N, 4), dtype=np.float64)
+    if N == 0:
+        return np.zeros((0, 4), dtype=np.float64)
     p10, p11, p12 = P1[0], P1[1], P1[2]
     p20, p21, p22 = P2[0], P2[1], P2[2]
-    for i in range(N):
-        u1, v1 = uv1[i]
-        u2, v2 = uv2[i]
-        A = np.stack([
-            u1 * p12 - p10,
-            v1 * p12 - p11,
-            u2 * p22 - p20,
-            v2 * p22 - p21,
-        ], axis=0)
-        _, _, Vt = np.linalg.svd(A)
-        Xh = Vt[-1]
-        if abs(Xh[3]) < 1e-12:
-            Xh[3] = 1e-12
-        X[i] = Xh / Xh[3]
-    return X
+    u1 = uv1[:, 0:1]  # (N, 1)
+    v1 = uv1[:, 1:2]
+    u2 = uv2[:, 0:1]
+    v2 = uv2[:, 1:2]
+    # Build all A matrices at once: (N, 4, 4)
+    A = np.empty((N, 4, 4), dtype=np.float64)
+    A[:, 0, :] = u1 * p12 - p10
+    A[:, 1, :] = v1 * p12 - p11
+    A[:, 2, :] = u2 * p22 - p20
+    A[:, 3, :] = v2 * p22 - p21
+    # Batch SVD — np.linalg.svd supports leading batch dims
+    _, _, Vt = np.linalg.svd(A)  # Vt: (N, 4, 4)
+    Xh = Vt[:, -1, :]  # (N, 4) — null-space vector
+    w = Xh[:, 3:4]
+    w = np.where(np.abs(w) < 1e-12, 1e-12, w)
+    return Xh / w
 
 
 def reprojection_errors(P: np.ndarray, X: np.ndarray, uv: np.ndarray) -> np.ndarray:

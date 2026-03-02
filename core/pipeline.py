@@ -3,8 +3,13 @@ from __future__ import annotations
 
 import math
 import os
+import platform
+import queue
+import sys
+import threading
 import time
 import gc
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -33,6 +38,26 @@ from .writers import write_ply
 
 # How often to generate a debug preview (every N pairs). 0 = every pair.
 _DEBUG_PREVIEW_INTERVAL = 3
+
+
+def _is_embedded_python() -> bool:
+    """Detect whether Python is embedded inside a host application.
+
+    When embedded (e.g. inside LichtFeld Studio), DataLoader workers cannot be
+    used because:
+      1. ``sys.executable`` is the host exe — ``multiprocessing.spawn`` passes
+         interpreter flags (like ``-s``) that the host does not understand.
+      2. Even with the correct ``python.exe``, the plugin module namespace
+         (``lfs_plugins.densification``) is registered at runtime by the
+         host’s plugin manager and is not discoverable by a fresh interpreter.
+      3. The ``lichtfeld`` C-extension is only loadable inside the host.
+
+    Returns True when workers must be disabled (num_workers=0).
+    """
+    if platform.system() != "Windows":
+        return False
+    exe_name = os.path.basename(sys.executable).lower()
+    return not exe_name.startswith("python")
 
 
 @dataclass
@@ -235,6 +260,50 @@ def _shutdown_loader_workers(loader: Optional[DataLoader], iterator) -> None:
 
     if shutdown_errors:
         lf.log.warn(f"DataLoader worker shutdown raised {len(shutdown_errors)} error(s)")
+
+
+# ---------------------------------------------------------------------------
+# Thread-based prefetcher – overlaps I/O with GPU compute when
+# DataLoader workers are unavailable (num_workers=0).
+# ---------------------------------------------------------------------------
+
+class _ThreadPrefetcher:
+    """Wrap an iterable so that the *next* item is loaded in a background thread.
+
+    This is especially useful when ``num_workers=0`` (embedded-Python mode):
+    the DataLoader does all I/O in the main thread, so without prefetching
+    the GPU sits idle while images are read from disk.  A single daemon
+    thread fills a bounded queue, letting the main thread keep the GPU busy.
+    """
+
+    _SENTINEL = object()
+
+    def __init__(self, iterable, maxsize: int = 2):
+        self._queue: queue.Queue = queue.Queue(maxsize=maxsize)
+        self._thread = threading.Thread(
+            target=self._producer, args=(iterable,), daemon=True,
+        )
+        self._thread.start()
+
+    def _producer(self, iterable):
+        try:
+            for item in iterable:
+                self._queue.put(item)
+        except Exception as exc:
+            self._queue.put(exc)
+        finally:
+            self._queue.put(self._SENTINEL)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        item = self._queue.get()
+        if item is self._SENTINEL:
+            raise StopIteration
+        if isinstance(item, Exception):
+            raise item
+        return item
 
 
 def _build_filtered_match_preview(
@@ -505,13 +574,17 @@ def run_dense_pipeline(
     pack_loader = None
     pack_loader_iter = None
 
+    tri_pool: Optional[ThreadPoolExecutor] = None
+    pending_tri: Optional[Tuple[Future, dict]] = None
+
     try:
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        matcher = RomaMatcher(device=device, mode="outdoor", setting=config.roma_setting)
+        # Set cuDNN flags *before* the first convolution so the benchmark
+        # autotuner kicks in from the very first layer.
         if torch.cuda.is_available():
-            torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
             torch.backends.cudnn.benchmark = True
+        matcher = RomaMatcher(device=device, mode="outdoor", setting=config.roma_setting)
         if _is_cancelled(cancel_requested):
             raise PipelineCancelled("Cancelled")
 
@@ -519,7 +592,15 @@ def run_dense_pipeline(
         w_match, h_match = matcher.w_resized, matcher.h_resized
         prefetch_packages = max(1, int(getattr(config, "prefetch_packages", 8)))
         pack_workers = max(1, int(getattr(config, "pack_workers", 4)))
-        prefetch_factor = max(1, int(math.ceil(float(prefetch_packages) / float(pack_workers))))
+
+        # On Windows with embedded Python, DataLoader workers are unusable:
+        # the host exe is not a Python interpreter and the plugin module
+        # namespace cannot be resolved by a standalone interpreter.
+        if pack_workers > 0 and _is_embedded_python():
+            lf.log.info("Embedded Python detected; using num_workers=0 for DataLoader")
+            pack_workers = 0
+
+        prefetch_factor = max(1, int(math.ceil(float(prefetch_packages) / max(1, pack_workers))))
 
         pack_dataset = _PackedReferenceDataset(
             refs_local=refs_local,
@@ -538,7 +619,7 @@ def run_dense_pipeline(
             batch_size=1,
             shuffle=False,
             num_workers=pack_workers,
-            prefetch_factor=prefetch_factor,
+            prefetch_factor=prefetch_factor if pack_workers > 0 else None,
             persistent_workers=pack_workers > 0,
             pin_memory=False,
             drop_last=False,
@@ -551,10 +632,100 @@ def run_dense_pipeline(
         pack_loader = DataLoader(**loader_kwargs)
         pack_loader_iter = iter(pack_loader)
 
+        # When workers are unavailable, wrap the loader with a thread-based
+        # prefetcher so the *next* batch is loaded while the GPU matches.
+        if pack_workers == 0:
+            pack_loader_iter = _ThreadPrefetcher(pack_loader_iter, maxsize=2)
+
+        tri_pool = ThreadPoolExecutor(max_workers=1)
+
+        # -- helper: drain a pending background triangulation ---------------
+        def _drain_pending():
+            """Collect the result of the previous background triangulation."""
+            nonlocal pending_tri, pairs_processed
+            if pending_tri is None:
+                return
+            fut, meta = pending_tri
+            pending_tri = None
+            try:
+                result = fut.result()
+            except Exception as ex:
+                lf.log.error(f"Triangulation error for ref {meta['ref_id']}: {ex}")
+                return
+            if result is None:
+                return
+            xyz, rgb, err, debug_matches_by_nbr, debug_cert_by_nbr = result
+            all_xyz.append(xyz)
+            all_rgb.append(rgb)
+            all_err.append(err)
+            pairs_processed += 1
+
+            if meta["collect_debug"]:
+                total_pairs_val = total_pairs_est if total_pairs_est > 0 else max(pair_counter, 1)
+                for nbr_id, matches in debug_matches_by_nbr.items():
+                    if _is_cancelled(cancel_requested):
+                        return
+                    imB_np_d = meta["image_by_nbr"].get(nbr_id)
+                    pair_idx = meta["pair_index_by_nbr"].get(nbr_id)
+                    cert_norm = debug_cert_by_nbr.get(nbr_id)
+                    if imB_np_d is None or pair_idx is None or cert_norm is None:
+                        continue
+                    should_preview = (
+                        not debug_state.is_auto_step()
+                        or _DEBUG_PREVIEW_INTERVAL <= 0
+                        or pair_idx % _DEBUG_PREVIEW_INTERVAL == 1
+                    )
+                    if not should_preview:
+                        continue
+                    try:
+                        preview = _build_filtered_match_preview(
+                            meta["imA_np"],
+                            imB_np_d,
+                            matches,
+                            cert_norm,
+                            meta["ref_id"],
+                            nbr_id,
+                            os.path.basename(meta["ref_path"]),
+                            os.path.basename(path_by[nbr_id]),
+                            pair_idx,
+                            total_pairs_val,
+                            match_count=int(matches.shape[0]),
+                        )
+                        if preview:
+                            debug_state.submit_preview(preview)
+                    except Exception as exc:
+                        lf.log.warn(f"Debug preview failed: {exc}")
+
+            if (
+                on_sequential_viz
+                and viz_interval > 0
+                and pairs_processed % viz_interval == 0
+                and intermediate_ply_base
+            ):
+                if _is_cancelled(cancel_requested):
+                    return
+                try:
+                    xyz_so_far = np.concatenate(all_xyz, axis=0)
+                    rgb_so_far = np.concatenate(all_rgb, axis=0)
+                    intermediate_ply_path = f"{intermediate_ply_base}_{pairs_processed}.ply"
+                    write_ply(intermediate_ply_path, xyz_so_far, to_uint8_rgb(rgb_so_far))
+                    lf.log.debug(
+                        f"Live update: {xyz_so_far.shape[0]:,} points after {pairs_processed} refs"
+                    )
+                    on_sequential_viz(intermediate_ply_path)
+                except Exception as exc:
+                    lf.log.warn(f"Failed to emit intermediate PLY: {exc}")
+
+        # -- main loop ------------------------------------------------------
         refs_consumed = 0
         while True:
             if _is_cancelled(cancel_requested):
                 raise PipelineCancelled("Cancelled")
+
+            # Drain the previous background triangulation before starting a
+            # new GPU match so results accumulate in order.
+            _drain_pending()
+
             try:
                 packed = next(pack_loader_iter)
             except StopIteration:
@@ -632,9 +803,8 @@ def run_dense_pipeline(
                 warp_list_cpu.append(warp_cpu)
                 cert_list_cpu.append(cert_cpu)
 
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-
+            # non_blocking transfers above sync implicitly when CPU reads
+            # the data in _triangulate_ref; no explicit synchronize needed.
             del batch_results
 
             if not cert_list_cpu:
@@ -642,8 +812,19 @@ def run_dense_pipeline(
 
             collect_debug_matches = debug_state is not None and debug_state.is_enabled()
 
-            try:
-                result = _triangulate_ref(
+            # Submit triangulation to background thread so the GPU can start
+            # matching the *next* reference in parallel with CPU work.
+            tri_meta = {
+                "ref_id": ref_id,
+                "ref_path": ref_path,
+                "imA_np": imA_np,
+                "pair_index_by_nbr": dict(pair_index_by_nbr),
+                "image_by_nbr": dict(image_by_nbr),
+                "collect_debug": collect_debug_matches,
+            }
+            pending_tri = (
+                tri_pool.submit(
+                    _triangulate_ref,
                     ref_id,
                     nn_ids,
                     warp_list_cpu,
@@ -661,79 +842,24 @@ def run_dense_pipeline(
                     size_by,
                     config,
                     matcher.sample_thresh,
-                    collect_debug_matches=collect_debug_matches,
-                )
-            except Exception as ex:
-                lf.log.error(f"Triangulation error for ref {ref_id}: {ex}")
-                result = None
+                    collect_debug_matches,
+                ),
+                tri_meta,
+            )
 
-            if result is None:
-                continue
-
-            xyz, rgb, err, debug_matches_by_nbr, debug_cert_by_nbr = result
-            all_xyz.append(xyz)
-            all_rgb.append(rgb)
-            all_err.append(err)
-            pairs_processed += 1
-
-            if collect_debug_matches:
-                total_pairs_val = total_pairs_est if total_pairs_est > 0 else max(pair_counter, 1)
-                for nbr_id, matches in debug_matches_by_nbr.items():
-                    if _is_cancelled(cancel_requested):
-                        raise PipelineCancelled("Cancelled")
-                    imB_np = image_by_nbr.get(nbr_id)
-                    pair_idx = pair_index_by_nbr.get(nbr_id)
-                    cert_norm = debug_cert_by_nbr.get(nbr_id)
-                    if imB_np is None or pair_idx is None or cert_norm is None:
-                        continue
-                    should_preview = (
-                        not debug_state.is_auto_step()
-                        or _DEBUG_PREVIEW_INTERVAL <= 0
-                        or pair_idx % _DEBUG_PREVIEW_INTERVAL == 1
-                    )
-                    if not should_preview:
-                        continue
-                    try:
-                        preview = _build_filtered_match_preview(
-                            imA_np,
-                            imB_np,
-                            matches,
-                            cert_norm,
-                            ref_id,
-                            nbr_id,
-                            os.path.basename(ref_path),
-                            os.path.basename(path_by[nbr_id]),
-                            pair_idx,
-                            total_pairs_val,
-                            match_count=int(matches.shape[0]),
-                        )
-                        if preview:
-                            debug_state.submit_preview(preview)
-                    except Exception as exc:
-                        lf.log.warn(f"Debug preview failed: {exc}")
-
-            if (
-                on_sequential_viz
-                and viz_interval > 0
-                and pairs_processed % viz_interval == 0
-                and intermediate_ply_base
-            ):
-                if _is_cancelled(cancel_requested):
-                    raise PipelineCancelled("Cancelled")
-                try:
-                    xyz_so_far = np.concatenate(all_xyz, axis=0)
-                    rgb_so_far = np.concatenate(all_rgb, axis=0)
-                    intermediate_ply_path = f"{intermediate_ply_base}_{pairs_processed}.ply"
-                    write_ply(intermediate_ply_path, xyz_so_far, to_uint8_rgb(rgb_so_far))
-                    lf.log.debug(
-                        f"Live update: {xyz_so_far.shape[0]:,} points after {pairs_processed} refs"
-                    )
-                    on_sequential_viz(intermediate_ply_path)
-                except Exception as exc:
-                    lf.log.warn(f"Failed to emit intermediate PLY: {exc}")
+        # Drain the last pending triangulation after the loop ends.
+        _drain_pending()
 
     finally:
         _shutdown_loader_workers(pack_loader, pack_loader_iter)
+        if tri_pool is not None:
+            tri_pool.shutdown(wait=True)
+        if pending_tri is not None:
+            try:
+                pending_tri[0].result()
+            except Exception:
+                pass
+            pending_tri = None
         if matcher is not None:
             try:
                 matcher.close()
