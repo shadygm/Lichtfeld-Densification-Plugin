@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gc
+import os
 from typing import List, Tuple
 
 import lichtfeld as lf
@@ -17,6 +18,56 @@ if str(_ROMA_SRC) not in sys.path:
     sys.path.insert(0, str(_ROMA_SRC))
 
 from romav2 import RoMaV2
+
+_ROMA_WEIGHTS_FILE = "romav2.pt"
+
+
+def _dedupe_paths(paths: List[str]) -> List[str]:
+    unique: List[str] = []
+    seen = set()
+    for path in paths:
+        if not path:
+            continue
+        norm = os.path.normcase(os.path.normpath(path))
+        if norm in seen:
+            continue
+        seen.add(norm)
+        unique.append(path)
+    return unique
+
+
+def _roma_checkpoint_dirs() -> List[str]:
+    candidates: List[str] = []
+    try:
+        candidates.append(os.path.join(torch.hub.get_dir(), "checkpoints"))
+    except Exception:
+        pass
+
+    torch_home = os.getenv("TORCH_HOME")
+    if torch_home:
+        candidates.append(os.path.join(os.path.expanduser(torch_home), "hub", "checkpoints"))
+
+    xdg_cache_home = os.getenv("XDG_CACHE_HOME", "~/.cache")
+    candidates.append(os.path.join(os.path.expanduser(xdg_cache_home), "torch", "hub", "checkpoints"))
+
+    if os.name == "nt":
+        local_app_data = os.getenv("LOCALAPPDATA")
+        if local_app_data:
+            candidates.append(os.path.join(local_app_data, "torch", "hub", "checkpoints"))
+        user_profile = os.getenv("USERPROFILE")
+        if user_profile:
+            candidates.append(os.path.join(user_profile, "AppData", "Local", "torch", "hub", "checkpoints"))
+
+    # Preserve order while removing duplicates across path style differences.
+    return _dedupe_paths(candidates)
+
+
+def romav2_cached_weights_paths() -> List[str]:
+    return [os.path.join(root, _ROMA_WEIGHTS_FILE) for root in _roma_checkpoint_dirs()]
+
+
+def has_cached_romav2_weights() -> bool:
+    return any(os.path.isfile(path) for path in romav2_cached_weights_paths())
 
 
 class RomaMatcher:

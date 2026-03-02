@@ -25,7 +25,7 @@ from .geometry import (
 )
 from .image_utils import apply_mask_to_rgb, load_mask_resized_np, load_rgb_resized, to_uint8_rgb
 from .debug_viz import MatchPreview, MatchDebugState
-from .matcher import RomaMatcher
+from .matcher import RomaMatcher, has_cached_romav2_weights, romav2_cached_weights_paths
 from .sampling import select_samples_with_coverage
 from .threaded_dataloader import ThreadedReferenceLoader
 from .writers import write_ply
@@ -319,6 +319,22 @@ def _report_matching_progress(
         pct,
         f"matching {refs_consumed}/{total_refs} | {refs_consumed / max(0.001, time.time() - start_time):.1f} it/s",
     )
+
+
+def _report_model_setup_status(
+    progress_callback: Optional[Callable[[float, str], None]],
+    model_cached: bool,
+) -> None:
+    if model_cached:
+        msg = "Initializing RoMa v2 model..."
+    else:
+        msg = "Installing model weights..."
+    if progress_callback is not None:
+        progress_callback(10.0, msg)
+    lf.log.info(msg)
+    if not model_cached:
+        cache_hints = ", ".join(romav2_cached_weights_paths())
+        lf.log.info(f"RoMaV2 weights not found in cache; expected cache paths: {cache_hints}")
 
 
 def _build_pack_loader(
@@ -764,11 +780,16 @@ def run_dense_pipeline(
     pack_loader: Optional[ThreadedReferenceLoader[Optional[_PackedReferenceBatch]]] = None
 
     try:
-        device = "cuda"
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model_cached = has_cached_romav2_weights()
+        _report_model_setup_status(progress_callback, model_cached)
         matcher = RomaMatcher(device=device, mode="outdoor", setting=config.roma_setting)
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cudnn.benchmark = True
+        if not model_cached and progress_callback is not None:
+            progress_callback(10.0, "RoMa v2 model installation complete. Starting matching...")
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            torch.backends.cudnn.benchmark = True
         _raise_if_cancelled(cancel_requested)
 
         total_refs = len(refs_local)
