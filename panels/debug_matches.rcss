@@ -1,0 +1,52 @@
+/* Debug matches floating panel styles */
+
+body {
+    font-family: Inter;
+    font-size: 10dp;
+}
+
+body.debug-panel {
+    padding: 12dp 14dp;
+}
+
+.debug-empty {
+    display: block;
+    font-size: 10dp;
+    margin-bottom: 4dp;
+}
+
+.debug-hint {
+    display: block;
+    font-size: 9dp;
+}
+
+.debug-pair-label {
+    display: block;
+    font-size: 11dp;
+    font-weight: bold;
+    margin-bottom: 2dp;
+}
+
+.debug-info-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 2dp;
+}
+
+.debug-key {
+    display: inline;
+    font-size: 9dp;
+    min-width: 70dp;
+}
+
+.debug-val {
+    display: inline;
+    font-size: 9dp;
+}
+
+.debug-controls {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8dp;
+}

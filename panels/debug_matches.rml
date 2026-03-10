@@ -1,0 +1,42 @@
+<rml>
+<head>
+  <link type="text/rcss" href="debug_matches.rcss"/>
+</head>
+<body data-model="debug_matches" class="debug-panel">
+
+  <div data-if="!has_preview">
+    <span class="debug-empty text-muted">No match preview available yet.</span>
+    <span class="debug-hint text-muted">Start densification with debug enabled to see match pairs.</span>
+  </div>
+
+  <div data-if="has_preview">
+    <!-- Current pair info -->
+    <span class="debug-pair-label text-accent">Pair {{pair_index}} / {{total_pairs}}</span>
+    <div class="separator"></div>
+
+    <div class="debug-info-grid">
+      <span class="debug-key text-muted">Reference:</span>
+      <span class="debug-val text-default">{{ref_label}} (id {{ref_id}})</span>
+
+      <span class="debug-key text-muted">Neighbor:</span>
+      <span class="debug-val text-default">{{nbr_label}} (id {{nbr_id}})</span>
+
+      <span class="debug-key text-muted">Matches:</span>
+      <span class="debug-val text-default">{{match_count}}</span>
+    </div>
+
+    <div class="separator"></div>
+
+    <!-- Step controls -->
+    <div class="debug-controls">
+      <button class="btn btn--default" data-event-click="do_step"
+              title="Advance to the next match pair">Next Pair</button>
+      <label class="setting-label">
+        <input type="checkbox" data-checked="auto_step" />
+        <span>Auto-step</span>
+      </label>
+    </div>
+  </div>
+
+</body>
+</rml>

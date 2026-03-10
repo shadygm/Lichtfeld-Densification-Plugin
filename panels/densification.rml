@@ -1,0 +1,197 @@
+<rml>
+<head>
+  <link type="text/rcss" href="densification.rcss"/>
+</head>
+<body data-model="densification">
+<div id="content-wrap">
+<div id="content">
+
+  <!-- Header -->
+  <span class="dense-title text-accent">Dense Point Cloud Initialization</span>
+  <span class="dense-subtitle text-muted">Densify sparse reconstruction using RoMa v2 matching</span>
+
+  <div class="separator"></div>
+
+  <!-- No scene warning -->
+  <div data-if="!has_scene">
+    <span class="status-text status-warning">No scene loaded. Please load a dataset first.</span>
+    <span class="dense-help text-muted">Load a COLMAP dataset or scene to enable densification.</span>
+  </div>
+
+  <!-- Main content (only when scene is loaded) -->
+  <div data-if="has_scene">
+
+    <span class="dense-status text-default">{{camera_count_text}}</span>
+
+    <div class="separator"></div>
+
+    <!-- Matching (collapsible) -->
+    <div class="section-header" id="hdr-matching" data-event-click="toggle_section('matching')">
+      <span class="section-arrow" id="arrow-matching">&#x25B6;</span>
+      <span>Matching</span>
+    </div>
+    <div class="section-content collapsed" id="sec-matching">
+      <div class="setting-row" data-attr-title="roma_description">
+        <span class="prop-label">Quality Preset</span>
+        <select data-value="roma_setting">
+          <option value="high">High</option>
+          <option value="base">Base</option>
+          <option value="fast">Fast</option>
+          <option value="turbo">Turbo</option>
+        </select>
+      </div>
+      <div class="setting-row" data-if="has_masks" title="Apply loaded image masks during matching to restrict feature correspondence to valid regions.">
+        <label class="setting-label">
+          <input type="checkbox" data-checked="use_masks" />
+          <span>Use Masks</span>
+        </label>
+      </div>
+      <div class="setting-row" title="Maximum number of feature matches sampled per reference-neighbor pair.">
+        <span class="prop-label">Matches per Ref</span>
+        <input type="text" class="number-input" data-value="matches_per_ref_str" />
+        <button class="num-step-btn" data-event-mousedown="num_step('matches_per_ref', -1)">-</button>
+        <button class="num-step-btn" data-event-mousedown="num_step('matches_per_ref', 1)">+</button>
+      </div>
+      <div class="setting-row" title="Minimum RoMa match certainty. Higher values keep only the most confident matches.">
+        <span class="prop-label">Min Certainty</span>
+        <input type="range" class="setting-slider" data-value="certainty_thresh" min="0.0" max="1.0" step="0.01" />
+        <span class="slider-value">{{certainty_thresh | format_float(2)}}</span>
+      </div>
+    </div>
+
+    <!-- Camera Selection (collapsible) -->
+    <div class="section-header" id="hdr-cameras" data-event-click="toggle_section('cameras')">
+      <span class="section-arrow" id="arrow-cameras">&#x25B6;</span>
+      <span>Camera Selection</span>
+    </div>
+    <div class="section-content collapsed" id="sec-cameras">
+      <div class="setting-row" title="Fraction of cameras to use as reference views. Higher values use more pairs but take longer.">
+        <span class="prop-label">Reference Fraction</span>
+        <input type="range" class="setting-slider" data-value="num_refs" min="0.1" max="1.0" step="0.01" />
+        <span class="slider-value">{{num_refs | format_float(2)}}</span>
+      </div>
+      <div class="setting-row" title="Number of nearest neighbor views matched against each reference camera.">
+        <span class="prop-label">Neighbors per Ref</span>
+        <input type="range" class="setting-slider" data-value="nns_per_ref" min="1" max="10" step="1" />
+        <span class="slider-value">{{nns_per_ref}}</span>
+      </div>
+    </div>
+
+    <!-- Geometry & Filtering (collapsible) -->
+    <div class="section-header" id="hdr-filtering" data-event-click="toggle_section('filtering')">
+      <span class="section-arrow" id="arrow-filtering">&#x25B6;</span>
+      <span>Geometry &amp; Filtering</span>
+    </div>
+    <div class="section-content collapsed" id="sec-filtering">
+      <div class="setting-row" title="Maximum reprojection error in pixels. Matches exceeding this are discarded.">
+        <span class="prop-label">Max Reproj Error (px)</span>
+        <input type="range" class="setting-slider" data-value="reproj_thresh" min="0.1" max="5.0" step="0.1" />
+        <span class="slider-value">{{reproj_thresh | format_float(1)}}</span>
+      </div>
+      <div class="setting-row" title="Maximum Sampson epipolar error. Lower values enforce stricter geometric consistency.">
+        <span class="prop-label">Max Sampson Error</span>
+        <input type="range" class="setting-slider" data-value="sampson_thresh" min="0.0" max="10.0" step="0.5" />
+        <span class="slider-value">{{sampson_thresh | format_float(1)}}</span>
+      </div>
+      <div class="setting-row" title="Minimum triangulation angle in degrees. Rejects matches with near-zero baseline.">
+        <span class="prop-label">Min Parallax (deg)</span>
+        <input type="range" class="setting-slider" data-value="min_parallax_deg" min="0.0" max="5.0" step="0.1" />
+        <span class="slider-value">{{min_parallax_deg | format_float(1)}}</span>
+      </div>
+      <div class="setting-row">
+        <label class="setting-label">
+          <input type="checkbox" data-checked="distance_filter_enabled" />
+          <span>Distance Filter</span>
+        </label>
+      </div>
+      <div class="indent" data-if="distance_filter_enabled">
+        <div class="setting-row" title="Minimum distance between points (voxel size). Larger values produce fewer, more uniformly spaced points.">
+          <span class="prop-label">Min Distance</span>
+          <input type="range" class="setting-slider" data-value="voxel_size" min="0.001" max="0.1" step="0.001" />
+          <span class="slider-value">{{voxel_size | format_float(3)}}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Output (collapsible) -->
+    <div class="section-header" id="hdr-output" data-event-click="toggle_section('output')">
+      <span class="section-arrow" id="arrow-output">&#x25B6;</span>
+      <span>Output</span>
+    </div>
+    <div class="section-content collapsed" id="sec-output">
+      <div class="setting-row" title="Cap the total number of generated points. Set to 0 for unlimited output.">
+        <span class="prop-label">Max Points</span>
+        <input type="text" class="number-input" data-value="max_points_str" />
+        <button class="num-step-btn" data-event-mousedown="num_step('max_points', -1)">-</button>
+        <button class="num-step-btn" data-event-mousedown="num_step('max_points', 1)">+</button>
+      </div>
+      <div class="setting-row" title="How often to refresh the viewport point cloud during processing. Set to 0 to only update on completion.">
+        <span class="prop-label">Viewport Update Interval</span>
+        <input type="range" class="setting-slider" data-value="viz_interval" min="0" max="10" step="1" />
+        <span class="slider-value">{{viz_interval}}</span>
+      </div>
+    </div>
+
+    <!-- Debug (collapsible) -->
+    <div class="section-header" id="hdr-debug" data-event-click="toggle_section('debug')">
+      <span class="section-arrow" id="arrow-debug">&#x25B6;</span>
+      <span>Debug</span>
+    </div>
+    <div class="section-content collapsed" id="sec-debug">
+      <div class="setting-row">
+        <label class="setting-label">
+          <input type="checkbox" data-checked="debug_enabled" />
+          <span>Debug Window</span>
+        </label>
+      </div>
+      <div class="indent" data-if="debug_enabled">
+        <div class="setting-row">
+          <label class="setting-label">
+            <input type="checkbox" data-checked="debug_auto_step" />
+            <span>Auto-step</span>
+          </label>
+        </div>
+        <span class="dense-help text-muted" data-if="!debug_auto_step">Manual stepping: use 'Next pair' in the debug window.</span>
+      </div>
+    </div>
+
+    <div class="separator"></div>
+
+    <!-- Action buttons and progress -->
+    <div data-if="show_idle">
+      <button class="btn btn--success btn--full dense-action-btn"
+              data-event-click="do_start">Start Densification</button>
+    </div>
+
+    <div data-if="show_running">
+      <span class="dense-stage text-default">Stage: {{stage_text}}</span>
+      <div class="dense-progress-wrap">
+        <progress class="dense-progress" max="1" data-attr-value="progress_value"></progress>
+        <span class="progress__text">{{progress_pct}}</span>
+      </div>
+      <span class="dense-status-msg text-muted">{{progress_status}}</span>
+      <button class="btn btn--warning btn--full dense-action-btn"
+              data-event-click="do_cancel">Cancel</button>
+    </div>
+
+    <!-- Results -->
+    <div data-if="show_results">
+      <div class="separator"></div>
+      <span class="dense-section-label text-accent">Results</span>
+      <span class="dense-result text-default">Points generated: {{result_points}}</span>
+      <span class="dense-result text-default">Time: {{result_time}}</span>
+    </div>
+
+    <!-- Error -->
+    <div data-if="show_error">
+      <div class="separator"></div>
+      <span class="status-text status-error">Error:</span>
+      <span class="dense-error-detail text-default">{{error_text}}</span>
+    </div>
+
+  </div>
+
+</div>
+</div>
+</body>
+</rml>

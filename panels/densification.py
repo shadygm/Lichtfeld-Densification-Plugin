@@ -8,37 +8,34 @@ simply load your scene, adjust parameters if desired, and click Start.
 """
 
 import os
-import random
 import tempfile
 import threading
 import time
 import weakref
-import zlib
 from dataclasses import dataclass, field, replace
 from enum import Enum
+from pathlib import Path
 from typing import Callable, Optional, List, ClassVar
 
-import numpy as np
-from PIL import Image
-
 import lichtfeld as lf
-from lfs_plugins.types import Panel
+from lfs_plugins.types import RmlPanel
 
 from ..core.config import DensePipelineConfig
-from ..core.debug_viz import MatchDebugState, MatchPreview
+from ..core.debug_viz import MatchDebugState
+from .debug_matches import DebugMatchesPanel
 
 
 class DensifyStage(Enum):
     """Pipeline execution stage."""
 
-    IDLE = "idle"
-    LOADING = "loading"
-    MATCHING = "matching"
-    TRIANGULATING = "triangulating"
-    WRITING = "writing"
-    DONE = "done"
-    ERROR = "error"
-    CANCELLED = "cancelled"
+    IDLE = "Idle"
+    LOADING = "Loading"
+    MATCHING = "Matching"
+    TRIANGULATING = "Triangulating"
+    WRITING = "Writing"
+    DONE = "Done"
+    ERROR = "Error"
+    CANCELLED = "Cancelled"
 
 
 @dataclass
@@ -270,50 +267,69 @@ class DensifyJob:
                 self.debug_state.release_waiters()
 
 
-class DensificationPanel(Panel):
+class DensificationPanel(RmlPanel):
     """GUI panel for dense point cloud initialization workflow.
-    
+
     This panel uses cameras already loaded in LichtFeld Studio.
     Simply load your scene, adjust parameters if desired, and click Start.
     The resulting dense point cloud will be automatically added to the scene.
     """
 
+    idname = "densification.main"
     label = "Dense Initialization"
     space = "MAIN_PANEL_TAB"
     order = 21
+    rml_template = str(Path(__file__).resolve().with_name("densification.rml"))
+    rml_height_mode = "content"
+    update_interval_ms = 100
+
+    _ROMA_SETTINGS = ["high", "base", "fast", "turbo"]
+    _ROMA_DESCRIPTIONS = {
+        "high": "High: High quality, moderate speed (640px bidirectional)",
+        "base": "Base: Balanced quality/speed (640px)",
+        "fast": "Fast: Good quality, fast (512px) - Recommended",
+        "turbo": "Turbo: Fastest, lower quality (320px)",
+    }
+
+    _MATCHES_STEP = 500
+    _MAX_POINTS_STEP = 10000
 
     def __init__(self):
+        self._handle = None
+        self._doc = None
+
         self.job = None
         self.last_result = None
         self._pending_import = None
-        self._auto_import = True  # Auto-import result after completion
+        self._auto_import = True
 
         self.debug_state = MatchDebugState()
-
-        self.debug_enabled = False
-        self.debug_auto_step = True
+        DebugMatchesPanel.set_debug_state(self.debug_state)
+        self._debug_enabled = False
+        self._debug_auto_step = True
 
         self.config = DensePipelineConfig(output_path=self._get_temp_output_path())
+        self._voxel_size_ui = 0.01  # remembered slider value when filter is toggled
 
-        # Quality settings
-        # Keep a UI index for the quality dropdown; the actual value is stored in self.config.roma_setting.
-        self.roma_setting_idx = 3  # "fast" is default
-        self.roma_settings = ["precise", "high", "base", "fast", "turbo"]
-        self.roma_descriptions = [
-            "Precise: Highest quality, slowest (800px bidirectional)",
-            "High: High quality, moderate speed (640px bidirectional)", 
-            "Base: Balanced quality/speed (640px)",
-            "Fast: Good quality, fast (512px) - Recommended",
-            "Turbo: Fastest, lower quality (320px)",
-        ]
+        self._collapsed = {"cameras", "filtering", "output", "debug"}
 
-    def _get_temp_output_path(self) -> str:
-        """Generate a temporary path for the output PLY file."""
-        temp_dir = tempfile.gettempdir()
-        return os.path.join(temp_dir, "lfs_dense_init.ply")
+        # Track last-known state for dirty detection
+        self._last_running = False
+        self._last_progress = 0.0
+        self._last_status = ""
+        self._last_stage = ""
+        self._last_has_result = False
+        self._last_has_error = False
+        self._last_camera_count = -1
+        self._last_has_masks = False
+
+    # ── Helpers ──────────────────────────────────────────
+
+    @staticmethod
+    def _get_temp_output_path() -> str:
+        return os.path.join(tempfile.gettempdir(), "lfs_dense_init.ply")
 
     def _has_training_data(self) -> bool:
-        """Check if the scene has training cameras loaded."""
         try:
             scene = lf.get_scene()
             cameras = [n for n in scene.get_nodes() if n.has_camera]
@@ -321,8 +337,17 @@ class DensificationPanel(Panel):
         except Exception:
             return False
 
+    def _has_masks(self) -> bool:
+        try:
+            scene = lf.get_scene()
+            for n in scene.get_nodes():
+                if n.has_camera and getattr(n, "has_mask", False):
+                    return True
+            return False
+        except Exception:
+            return False
+
     def _get_camera_count(self) -> int:
-        """Get the number of cameras in the scene."""
         try:
             scene = lf.get_scene()
             cameras = [n for n in scene.get_nodes() if n.has_camera]
@@ -330,317 +355,347 @@ class DensificationPanel(Panel):
         except Exception:
             return 0
 
-    def draw(self, layout):
-        # Check for pending import (must happen on main thread)
+    def _dirty(self, *fields):
+        if not self._handle:
+            return
+        if not fields:
+            self._handle.dirty_all()
+            return
+        for f in fields:
+            self._handle.dirty(f)
+
+    # ── RmlPanel lifecycle ───────────────────────────────
+
+    def on_load(self, doc):
+        super().on_load(doc)
+        self._doc = doc
+        self._sync_section_states()
+
+    def on_bind_model(self, ctx):
+        model = ctx.create_data_model("densification")
+        if model is None:
+            return
+
+        # --- Scene state (read-only) ---
+        model.bind_func("has_scene", self._has_training_data)
+        model.bind_func("camera_count_text",
+                        lambda: f"Scene loaded with {self._get_camera_count()} cameras")
+
+        # --- Quality setting ---
+        model.bind("roma_setting",
+                    lambda: self.config.roma_setting,
+                    self._set_roma_setting)
+        model.bind_func("roma_description",
+                        lambda: self._ROMA_DESCRIPTIONS.get(self.config.roma_setting, ""))
+        model.bind_func("has_masks", self._has_masks)
+        model.bind("use_masks",
+                    lambda: self.config.use_masks,
+                    self._set_use_masks)
+
+        # --- Slider-bound config values ---
+        model.bind("num_refs",
+                    lambda: f"{self.config.num_refs:.2f}",
+                    lambda v: self._set_float_config("num_refs", v, 0.1, 1.0))
+        model.bind("nns_per_ref",
+                    lambda: str(self.config.nns_per_ref),
+                    lambda v: self._set_int_config("nns_per_ref", v, 1, 10))
+        model.bind("certainty_thresh",
+                    lambda: f"{self.config.certainty_thresh:.2f}",
+                    lambda v: self._set_float_config("certainty_thresh", v, 0.0, 1.0))
+        model.bind("reproj_thresh",
+                    lambda: f"{self.config.reproj_thresh:.1f}",
+                    lambda v: self._set_float_config("reproj_thresh", v, 0.1, 5.0))
+        model.bind("sampson_thresh",
+                    lambda: f"{self.config.sampson_thresh:.1f}",
+                    lambda v: self._set_float_config("sampson_thresh", v, 0.0, 10.0))
+        model.bind("min_parallax_deg",
+                    lambda: f"{self.config.min_parallax_deg:.1f}",
+                    lambda v: self._set_float_config("min_parallax_deg", v, 0.0, 5.0))
+        model.bind("viz_interval",
+                    lambda: str(self.config.viz_interval),
+                    lambda v: self._set_int_config("viz_interval", v, 0, 10))
+
+        # --- Number-input config values ---
+        model.bind("matches_per_ref_str",
+                    lambda: str(self.config.matches_per_ref),
+                    lambda v: self._set_int_config("matches_per_ref", v, 1000, 15000))
+        model.bind("max_points_str",
+                    lambda: str(self.config.max_points),
+                    lambda v: self._set_int_config("max_points", v, 0, 10000000))
+
+        # --- Distance filter ---
+        model.bind("distance_filter_enabled",
+                    lambda: self.config.voxel_size > 0.0,
+                    self._set_distance_filter_enabled)
+        model.bind("voxel_size",
+                    lambda: f"{self._voxel_size_ui:.3f}",
+                    lambda v: self._set_voxel_size(v))
+
+        # --- Debug controls ---
+        model.bind("debug_enabled",
+                    lambda: self._debug_enabled,
+                    self._set_debug_enabled)
+        model.bind("debug_auto_step",
+                    lambda: self._debug_auto_step,
+                    self._set_debug_auto_step)
+
+        # --- Job state (read-only) ---
+        model.bind_func("show_idle", lambda: not self._is_running())
+        model.bind_func("show_running", self._is_running)
+        model.bind_func("stage_text",
+                        lambda: self.job.stage.value.capitalize() if self.job else "Idle")
+        model.bind_func("progress_value",
+                        lambda: f"{max(0.0, min(1.0, self.job.progress / 100.0)):.4f}"
+                        if self.job else "0")
+        model.bind_func("progress_pct",
+                        lambda: f"{int(self.job.progress)}%"
+                        if self.job else "0%")
+        model.bind_func("progress_status",
+                        lambda: self.job.status if self.job else "")
+
+        # --- Result state ---
+        model.bind_func("show_results",
+                        lambda: self.last_result is not None and self.last_result.success)
+        model.bind_func("result_points",
+                        lambda: f"{self.last_result.num_points:,}"
+                        if self.last_result and self.last_result.success else "0")
+        model.bind_func("result_time",
+                        lambda: f"{self.last_result.elapsed_time:.1f}s"
+                        if self.last_result and self.last_result.success else "")
+        model.bind_func("show_error",
+                        lambda: self.last_result is not None and not self.last_result.success)
+        model.bind_func("error_text",
+                        lambda: self.last_result.error or "Unknown error"
+                        if self.last_result and not self.last_result.success else "")
+
+        # --- Events ---
+        model.bind_event("do_start", self._on_do_start)
+        model.bind_event("do_cancel", self._on_do_cancel)
+        model.bind_event("toggle_section", self._on_toggle_section)
+        model.bind_event("num_step", self._on_num_step)
+
+        self._handle = model.get_handle()
+
+    def on_update(self, doc):
+        # Handle pending import on main thread
         if self._pending_import:
             path = self._pending_import
             self._pending_import = None
             lf.log.info(f"Loading dense point cloud: {path}")
             self._import_ply(path)
 
-        layout.heading("Dense Point Cloud Initialization")
-        layout.label("Densify sparse reconstruction using RoMa v2 matching")
-        layout.separator()
+        dirty = False
 
-        # Scene status
-        has_data = self._has_training_data()
-        camera_count = self._get_camera_count() if has_data else 0
+        # Track running state changes
+        running = self._is_running()
+        if running != self._last_running:
+            self._last_running = running
+            self._dirty("show_idle", "show_running")
+            dirty = True
 
-        if has_data:
-            layout.label(f"Scene loaded with {camera_count} cameras")
-        else:
-            layout.text_colored("No scene loaded. Please load a dataset first.", (1.0, 0.6, 0.2, 1.0))
-            layout.separator()
-            layout.label("Load a COLMAP dataset or scene to enable densification.")
-            return  # Don't show rest of UI if no scene
-
-        layout.separator()
-
-        # Quality settings
-        if layout.collapsing_header("Quality Settings", default_open=True):
-            _, self.roma_setting_idx = layout.combo("Matching Quality", self.roma_setting_idx, self.roma_settings)
-            self.config.roma_setting = self.roma_settings[self.roma_setting_idx]
-            layout.label(self.roma_descriptions[self.roma_setting_idx])
-
-        # Advanced settings
-        if layout.collapsing_header("Advanced Settings", default_open=False):
-            layout.label("Reference View Selection:")
-            _, self.config.num_refs = layout.drag_float("Reference Fraction", self.config.num_refs, 0.01, 0.1, 1.0)
-            
-            _, self.config.nns_per_ref = layout.drag_int("Neighbors per Ref", self.config.nns_per_ref, 1, 1, 10)
-
-            layout.separator()
-            layout.label("Matching Parameters:")
-            
-            _, self.config.matches_per_ref = layout.drag_int("Matches per Ref", self.config.matches_per_ref, 100, 1000, 50000)
-            
-            _, self.config.certainty_thresh = layout.drag_float("Min Certainty", self.config.certainty_thresh, 0.01, 0.0, 1.0)
-
-            layout.separator()
-            layout.label("Geometric Filtering:")
-            
-            _, self.config.reproj_thresh = layout.drag_float("Max Reproj Error (px)", self.config.reproj_thresh, 0.1, 0.1, 10.0)
-            
-            _, self.config.sampson_thresh = layout.drag_float("Max Sampson Error", self.config.sampson_thresh, 0.5, 0.0, 50.0)
-            
-            _, self.config.min_parallax_deg = layout.drag_float("Min Parallax (deg)", self.config.min_parallax_deg, 0.1, 0.0, 10.0)
-
-            layout.separator()
-            layout.label("Output Options:")
-            
-            _, self.config.max_points = layout.drag_int("Max Points (0=unlimited)", self.config.max_points, 1000, 0, 10000000)
-            
-            _, self.config.no_filter = layout.checkbox("Disable Filtering", self.config.no_filter)
-
-            layout.separator()
-            layout.label("Pipeline Performance:")
-            _, self.config.prefetch_packages = layout.drag_int(
-                "Pack Ahead (refs)",
-                self.config.prefetch_packages,
-                1,
-                1,
-                32,
-            )
-            layout.label("(How many reference packages are prepared ahead of compute)")
-            _, self.config.pack_workers = layout.drag_int(
-                "Pack Workers",
-                self.config.pack_workers,
-                1,
-                1,
-                16,
-            )
-            layout.label("(Parallel workers used to prepare packages)")
-
-            layout.separator()
-            layout.label("Live Preview:")
-            
-            _, self.config.viz_interval = layout.drag_int("Update Every N Pairs", self.config.viz_interval, 1, 0, 100)
-            layout.label("(0 = only show final result)")
-
-            layout.separator()
-            layout.label("Debugging:")
-            changed_debug, self.debug_enabled = layout.checkbox("Debug matches (floating window)", self.debug_enabled)
-            if changed_debug:
-                self.debug_state.set_enabled(self.debug_enabled)
-                if not self.debug_enabled:
-                    # Ensure the pipeline is unblocked
-                    self.debug_state.set_auto_step(True)
-                    self.debug_state.release_waiters()
-
-            changed_auto, self.debug_auto_step = layout.checkbox("Auto-step", self.debug_auto_step)
-            if changed_auto:
-                self.debug_state.set_auto_step(self.debug_auto_step)
-                if self.debug_auto_step:
-                    self.debug_state.release_waiters()
-
-            if not self.debug_auto_step:
-                layout.text_disabled("Manual stepping: use 'Next pair' in the debug window.")
-
-        layout.separator()
-
-        # Auto-import option
-        _, self._auto_import = layout.checkbox("Auto-add to scene", self._auto_import)
-
-        layout.separator()
-
-        # Job status / start button
-        if self.job and self.job.is_running():
-            stage = self.job.stage.value
+        if running and self.job:
             progress = self.job.progress
+            status = self.job.status
+            stage = self.job.stage.value
+            if (progress != self._last_progress or
+                    status != self._last_status or
+                    stage != self._last_stage):
+                self._last_progress = progress
+                self._last_status = status
+                self._last_stage = stage
+                self._dirty("stage_text", "progress_value", "progress_pct", "progress_status")
+                dirty = True
 
-            layout.label(f"Stage: {stage.capitalize()}")
-            layout.progress_bar(progress / 100.0, self.job.status)
+        # Track result changes
+        has_result = self.last_result is not None and self.last_result.success
+        has_error = self.last_result is not None and not self.last_result.success
+        if has_result != self._last_has_result or has_error != self._last_has_error:
+            self._last_has_result = has_result
+            self._last_has_error = has_error
+            self._dirty("show_results", "result_points", "result_time",
+                        "show_error", "error_text",
+                        "show_idle", "show_running")
+            dirty = True
 
-            if layout.button("Cancel"):
-                self.job.cancel()
-        else:
-            if layout.button("Start Densification", (0, 36)):
-                self._start()
+        # Track camera count changes
+        cam_count = self._get_camera_count()
+        if cam_count != self._last_camera_count:
+            self._last_camera_count = cam_count
+            self._dirty("has_scene", "camera_count_text")
+            dirty = True
 
-        # Results display
-        if self.last_result and self.last_result.success:
-            layout.separator()
-            layout.heading("Results")
-            layout.label(f"Points generated: {self.last_result.num_points:,}")
-            layout.label(f"Time: {self.last_result.elapsed_time:.1f}s")
+        # Track mask availability changes
+        has_masks = self._has_masks()
+        if has_masks != self._last_has_masks:
+            self._last_has_masks = has_masks
+            if not has_masks:
+                self.config.use_masks = True
+            self._dirty("has_masks", "use_masks")
+            dirty = True
 
-            if self.last_result.output_path:
-                if not self._auto_import:
-                    if layout.button("Add to Scene", (0, 36)):
-                        self._import_ply(self.last_result.output_path)
+        return dirty
 
-        if self.last_result and not self.last_result.success:
-            layout.separator()
-            layout.text_colored("Error:", (1.0, 0.3, 0.3, 1.0))
-            layout.text_selectable(self.last_result.error or "Unknown error", 60)
+    def on_scene_changed(self, doc):
+        self._last_camera_count = -1
+        self._last_has_masks = not self._has_masks()  # force redirty next update
+        if self._handle:
+            self._dirty("has_scene", "camera_count_text", "has_masks", "use_masks")
 
-        # Floating debug window (if enabled)
-        self._draw_debug_window(layout)
+    def on_unload(self, doc):
+        doc.remove_data_model("densification")
+        self._handle = None
+        self._doc = None
 
-    def _draw_debug_window(self, layout):
-        if not self.debug_state.is_enabled():
+    # ── Section toggle ───────────────────────────────────
+
+    def _get_section_elements(self, name):
+        if not self._doc:
+            return None, None, None
+        header = self._doc.get_element_by_id(f"hdr-{name}")
+        arrow = self._doc.get_element_by_id(f"arrow-{name}")
+        content = self._doc.get_element_by_id(f"sec-{name}")
+        return header, arrow, content
+
+    def _sync_section_states(self):
+        for name in ("matching", "cameras", "filtering", "output", "debug"):
+            header, arrow, content = self._get_section_elements(name)
+            if content:
+                expanded = name not in self._collapsed
+                if expanded:
+                    content.set_class("collapsed", False)
+                else:
+                    content.set_class("collapsed", True)
+                if arrow:
+                    arrow.set_class("is-expanded", expanded)
+                if header:
+                    header.set_class("is-expanded", expanded)
+
+    def _on_toggle_section(self, handle, event, args):
+        del handle, event
+        if not args:
             return
+        name = str(args[0])
+        expanding = name in self._collapsed
+        if expanding:
+            self._collapsed.discard(name)
+        else:
+            self._collapsed.add(name)
 
-        layout.set_next_window_size((960, 560), first_use=True)
-        visible, still_open = layout.begin_window_closable("Dense Match Debug", flags=0)
+        header, arrow, content = self._get_section_elements(name)
+        if content:
+            content.set_class("collapsed", not expanding)
+        if arrow:
+            arrow.set_class("is-expanded", expanding)
+        if header:
+            header.set_class("is-expanded", expanding)
+
+    # ── Config setters ───────────────────────────────────
+
+    def _set_roma_setting(self, value):
+        value = str(value)
+        if value in self._ROMA_SETTINGS and value != self.config.roma_setting:
+            self.config.roma_setting = value
+            self._dirty("roma_setting", "roma_description")
+
+    def _set_use_masks(self, value):
+        v = bool(value)
+        if v != self.config.use_masks:
+            self.config.use_masks = v
+            self._dirty("use_masks")
+
+    def _set_float_config(self, attr, value, vmin, vmax):
         try:
-            if not visible:
-                if not still_open:
-                    self.debug_enabled = False
-                    self.debug_state.set_enabled(False)
-                return
-
-            layout.label("Live match previews")
-            changed_auto, auto_val = layout.checkbox("Auto-step", self.debug_state.is_auto_step())
-            if changed_auto:
-                self.debug_auto_step = auto_val
-                self.debug_state.set_auto_step(auto_val)
-                if auto_val:
-                    self.debug_state.release_waiters()
-
-            if not self.debug_state.is_auto_step():
-                if layout.button("Next pair", (120, 0)):
-                    self.debug_state.step_once()
-
-            layout.separator()
-
-            # --- Match visibility controls ---
-            cur_max = self.debug_state.max_visible_matches()
-            _, new_max = layout.drag_int("Visible matches (0=all)", cur_max, 1, 0, 5000)
-            if new_max != cur_max:
-                self.debug_state.set_max_visible_matches(new_max)
-
-            single = self.debug_state.is_single_match_mode()
-            changed_single, single_val = layout.checkbox("Single match mode", single)
-            if changed_single:
-                self.debug_state.set_single_match_mode(single_val)
-
-            preview = self.debug_state.latest()
-
-            if single_val and preview is not None:
-                total_m = preview.matches.shape[0] if preview.matches is not None else 0
-                cur_idx = self.debug_state.current_match_index()
-                layout.label(f"Match {min(cur_idx + 1, total_m)}/{total_m}")
-                with layout.row() as row:
-                    if row.button("<< Prev", (80, 0)):
-                        self.debug_state.prev_match(int(total_m))
-                    if row.button("Next >>", (80, 0)):
-                        self.debug_state.next_match(int(total_m))
-                _, idx_val = layout.drag_int("Match index", cur_idx, 1, 0, max(0, int(total_m) - 1))
-                if idx_val != cur_idx:
-                    self.debug_state.set_current_match_index(idx_val)
-
-            layout.separator()
-            total_pairs = max(self.debug_state.total_pairs(), 1)
-            if preview:
-                layout.label(f"Pair {preview.pair_index}/{preview.total_pairs or total_pairs}")
-                layout.label(f"{preview.ref_label} ↔ {preview.nbr_label}")
-                layout.label(f"Total matches: {preview.match_count}")
-                self._draw_match_preview(layout, preview, pair_index=int(preview.pair_index))
-            else:
-                layout.text_disabled("Waiting for matches...")
-        finally:
-            layout.end_window()
-
-    _DEBUG_PREVIEW_DRAW_SIZE = (512, 512)
-    _DEBUG_PREVIEW_LINE_THICKNESS = 0.1
-
-    def _draw_match_preview(self, layout, preview: MatchPreview, *, pair_index: int):
-        left = preview.left_image
-        right = preview.right_image
-        matches = preview.matches
-
-        if (
-            left is None
-            or right is None
-            or matches is None
-            or left.size == 0
-            or right.size == 0
-            or len(matches) == 0
-        ):
-            layout.text_disabled("No preview available")
+            v = max(vmin, min(vmax, float(value)))
+        except (TypeError, ValueError):
             return
-
-        total_matches = int(matches.shape[0])
-        visible_indices = self.debug_state.visible_match_indices(total_matches)
-        if not visible_indices:
-            layout.text_disabled("No matches selected for drawing")
+        if abs(v - getattr(self.config, attr)) < 1e-9:
             return
+        setattr(self.config, attr, v)
+        self._dirty(attr)
 
-        disp_w, disp_h = self._DEBUG_PREVIEW_DRAW_SIZE
+    def _set_int_config(self, attr, value, vmin, vmax):
+        try:
+            v = max(vmin, min(vmax, int(float(value))))
+        except (TypeError, ValueError):
+            return
+        if v == getattr(self.config, attr):
+            return
+        setattr(self.config, attr, v)
+        self._dirty(attr)
 
-        # Prepare images for display
-        img_left = np.asarray(
-            Image.fromarray(left).resize((disp_w, disp_h), Image.BILINEAR),
-            dtype=np.float32,
-        ) / 255.0
-        img_right = np.asarray(
-            Image.fromarray(right).resize((disp_w, disp_h), Image.BILINEAR),
-            dtype=np.float32,
-        ) / 255.0
+    def _set_debug_enabled(self, value):
+        self._debug_enabled = bool(value)
+        self.debug_state.set_enabled(self._debug_enabled)
+        if not self._debug_enabled:
+            self.debug_state.set_auto_step(True)
+            self.debug_state.release_waiters()
+        # Share state and toggle floating debug panel
+        DebugMatchesPanel.set_debug_state(self.debug_state)
+        lf.ui.set_panel_enabled(DebugMatchesPanel.idname, self._debug_enabled)
+        self._dirty("debug_enabled")
 
-        tensor_left = lf.Tensor.from_numpy(img_left)
-        tensor_right = lf.Tensor.from_numpy(img_right)
-
-        # Source (match) resolution from original images
-        src_h, src_w = left.shape[:2]
-        sx = disp_w / float(max(1, src_w))
-        sy = disp_h / float(max(1, src_h))
-
-        layout.new_line()
-        # Draw images and capture exact anchors
-        base_x, base_y = layout.get_cursor_screen_pos()
-
-        left_anchor = None
-        right_anchor = None
-        with layout.row() as row:
-            try:
-                left_anchor = row.get_cursor_screen_pos()
-            except Exception:
-                left_anchor = None
-
-            row.image_tensor("left", tensor_left, (disp_w, disp_h))
-
-            # Cursor now points to where the NEXT widget will go (i.e., the right image start)
-            try:
-                right_anchor = row.get_cursor_screen_pos()
-            except Exception:
-                right_anchor = None
-
-            row.image_tensor("right", tensor_right, (disp_w, disp_h))
-
-        left_x, left_y = left_anchor if left_anchor is not None else (base_x, base_y)
-        if right_anchor is not None:
-            right_x, right_y = right_anchor
+    def _set_distance_filter_enabled(self, value):
+        enabled = bool(value)
+        if enabled:
+            self.config.voxel_size = self._voxel_size_ui
         else:
-            # Fallback if SubLayout doesn't expose get_cursor_screen_pos
-            right_x, right_y = base_x + disp_w, base_y
+            self.config.voxel_size = 0.0
+        self._dirty("distance_filter_enabled", "voxel_size")
 
-        # Draw lines. Matches are in original image pixel coords.
-        thickness = float(self._DEBUG_PREVIEW_LINE_THICKNESS)
-        for idx in visible_indices:
-            xa, ya, xb, yb = matches[idx]
+    def _set_voxel_size(self, value):
+        try:
+            v = max(0.001, min(0.1, float(value)))
+        except (TypeError, ValueError):
+            return
+        if abs(v - self._voxel_size_ui) < 1e-6:
+            return
+        self._voxel_size_ui = v
+        self.config.voxel_size = v
+        self._dirty("voxel_size")
 
-            # Convert from original image coordinates to display coordinates
-            x1 = left_x + float(xa) * sx
-            y1 = left_y + float(ya) * sy
-            x2 = right_x + float(xb) * sx
-            y2 = right_y + float(yb) * sy
+    def _set_debug_auto_step(self, value):
+        self._debug_auto_step = bool(value)
+        self.debug_state.set_auto_step(self._debug_auto_step)
+        if self._debug_auto_step:
+            self.debug_state.release_waiters()
+        self._dirty("debug_auto_step")
 
-            color = self._feature_color(pair_index, int(idx), matches[int(idx)])
-            layout.draw_line(x1, y1, x2, y2, color, thickness)
+    def _on_num_step(self, handle, event, args):
+        if not args or len(args) < 2:
+            return
+        field_name = str(args[0])
+        direction = int(args[1])
 
-    @staticmethod
-    def _feature_color(pair_index: int, match_index: int, match: np.ndarray):
-        seed = zlib.crc32(np.asarray(match, dtype=np.float32).tobytes(), int(pair_index) & 0xFFFF_FFFF)
-        seed = zlib.crc32(str(int(match_index)).encode("ascii"), seed) & 0xFFFF_FFFF
-        rng = random.Random(seed)
-        return (
-            0.25 + 0.75 * rng.random(),
-            0.25 + 0.75 * rng.random(),
-            0.25 + 0.75 * rng.random(),
-            0.9,
-        )
+        step_map = {
+            "matches_per_ref": self._MATCHES_STEP,
+            "max_points": self._MAX_POINTS_STEP,
+        }
+        step = step_map.get(field_name, 1)
+        current = getattr(self.config, field_name, 0)
+        new_val = current + direction * step
+
+        range_map = {
+            "matches_per_ref": (1000, 15000),
+            "max_points": (0, 10000000),
+        }
+        vmin, vmax = range_map.get(field_name, (0, 999999999))
+        new_val = max(vmin, min(vmax, new_val))
+
+        if new_val != current:
+            setattr(self.config, field_name, new_val)
+            self._dirty(f"{field_name}_str")
+
+    # ── Job control ──────────────────────────────────────
+
+    def _is_running(self) -> bool:
+        return self.job is not None and self.job.is_running()
+
+    def _on_do_start(self, handle, event, args):
+        self._start()
+
+    def _on_do_cancel(self, handle, event, args):
+        if self.job:
+            self.job.cancel()
 
     def _start(self):
         if not self._has_training_data():
@@ -653,17 +708,13 @@ class DensificationPanel(Panel):
 
         self.last_result = None
 
-        # Sync debug controller with current UI settings before launching job
-        self.debug_state.set_enabled(self.debug_enabled)
-        self.debug_state.set_auto_step(self.debug_auto_step)
+        self.debug_state.set_enabled(self._debug_enabled)
+        self.debug_state.set_auto_step(self._debug_auto_step)
         self.debug_state.release_waiters()
 
-        # Snapshot the current config for the background job.
-        # (Avoids mutations from the UI while the job is running.)
         config = replace(
             self.config,
             output_path=self._get_temp_output_path(),
-            roma_setting=self.roma_settings[self.roma_setting_idx],
         )
 
         self.job = DensifyJob(
@@ -676,15 +727,11 @@ class DensificationPanel(Panel):
         self.job.start()
 
     def _on_sequential_viz(self, ply_path: str):
-        """Handle periodic visualization of intermediate PLY files during processing."""
-        # Schedule the import to happen on the main thread
         self._pending_import = ply_path
 
     def _on_complete(self, result: DensifyResult):
         lf.log.info(f"Densification complete: {result.num_points:,} points")
         self.last_result = result
-        
-        # Auto-import if enabled
         if self._auto_import and result.output_path:
             self._pending_import = result.output_path
 
@@ -706,7 +753,6 @@ class DensificationPanel(Panel):
                 lf.log.error("No scene available")
                 return
 
-            # Find the first POINTCLOUD node in the scene
             target = None
             for n in scene.get_nodes():
                 if n.type == lf.scene.NodeType.POINTCLOUD:
@@ -717,7 +763,6 @@ class DensificationPanel(Panel):
                 lf.log.error("No point cloud node found to replace")
                 return
 
-            # Load raw point cloud data (positions + colors)
             means, colors = lf.io.load_point_cloud(ply_path)
 
             lf.log.debug(
@@ -730,7 +775,6 @@ class DensificationPanel(Panel):
                 lf.log.error(f"Node '{target.name}' has no point cloud data")
                 return
 
-            # Replace data in-place
             pc.set_data(means, colors)
 
             lf.log.debug(

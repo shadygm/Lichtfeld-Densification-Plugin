@@ -3,7 +3,7 @@
 
 [project]
 name = "densification"
-version = "0.6.0"
+version = "0.7.0"
 description = "Dense point cloud initialization using RoMa v2 matching"
 author = "Shady Gmira"
 min_lichtfeld_version = "0.5.0"
@@ -19,6 +19,7 @@ dependencies = [
     "tqdm",
     "einops>=0.8.1",
     "rich>=14.2.0",
+    "open3d",
 ]
 
 [[tool.uv.index]]

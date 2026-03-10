@@ -26,6 +26,30 @@ from .core.selection import nearest_neighbors, select_cameras_by_visibility, sel
 from .core.writers import write_ply, write_points3D_bin
 
 
+def _voxel_downsample(
+    xyz: np.ndarray, rgb: np.ndarray, voxel_size: float
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Downsample points so they are roughly *voxel_size* apart.
+
+    Uses Open3D voxel grid downsampling which averages points
+    falling in the same voxel, producing a uniform distribution.
+    """
+    import open3d as o3d
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(xyz.astype(np.float64))
+    if rgb.max() > 1.0:
+        pcd.colors = o3d.utility.Vector3dVector(rgb[:, :3].astype(np.float64) / 255.0)
+    else:
+        pcd.colors = o3d.utility.Vector3dVector(rgb[:, :3].astype(np.float64))
+
+    down = pcd.voxel_down_sample(voxel_size=float(voxel_size))
+
+    out_xyz = np.asarray(down.points, dtype=np.float32)
+    out_rgb = np.asarray(down.colors, dtype=np.float32)  # [0, 1]
+    return out_xyz, out_rgb
+
+
 
 def load_reconstruction(sparse_dir: str):
     rec = pycolmap.Reconstruction(sparse_dir)
@@ -228,6 +252,9 @@ def dense_init_from_lfs(
         progress_callback(2.0, "Extracting camera data from scene...")
 
     records = extract_cameras_from_lfs(camera_nodes)
+    if not config.use_masks:
+        for r in records:
+            r.mask_path = None
     if len(records) < 2:
         return 1, "Need at least 2 cameras for dense initialization"
 
@@ -257,6 +284,14 @@ def dense_init_from_lfs(
         return 2, "Cancelled"
 
     xyz, rgb, err = _apply_point_cap(result.xyz, result.rgb, result.err, config.max_points, config.seed)
+
+    # Voxel-based distance filtering for uniform point distribution
+    if config.voxel_size > 0.0:
+        if progress_callback:
+            progress_callback(93.0, "Applying distance filter...")
+        xyz, rgb = _voxel_downsample(xyz, rgb, config.voxel_size)
+        lf.log.info(f"Distance filter ({config.voxel_size:.4f}): {xyz.shape[0]:,} points remaining")
+
     if progress_callback:
         progress_callback(95.0, "Writing output PLY...")
     write_ply(config.output_path, xyz, to_uint8_rgb(rgb))
