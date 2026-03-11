@@ -17,6 +17,8 @@ class DensePipelineConfig:
     min_parallax_deg: float = 0.5
     max_points: int = 0
     no_filter: bool = False
+    use_masks: bool = True
+    voxel_size: float = 0.0
     seed: int = 0
     viz_interval: int = 3
     prefetch_packages: int = 8

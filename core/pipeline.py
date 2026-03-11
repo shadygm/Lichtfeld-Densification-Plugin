@@ -317,7 +317,7 @@ def _report_matching_progress(
     pct = 10.0 + (float(refs_consumed - 1) / max(1, total_refs)) * 80.0
     progress_callback(
         pct,
-        f"matching {refs_consumed}/{total_refs} | {refs_consumed / max(0.001, time.time() - start_time):.1f} it/s",
+        f"Matching {refs_consumed}/{total_refs} | {refs_consumed / max(0.001, time.time() - start_time):.1f} it/s",
     )
 
 

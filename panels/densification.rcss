@@ -1,0 +1,136 @@
+/* Densification panel styles */
+
+/* Font must be declared here to avoid warnings during initial document load,
+   before the theme stylesheet (components.rcss) is applied by the host. */
+body {
+    font-family: Inter;
+    font-size: 10dp;
+}
+
+/* #content-wrap and #content are styled by components.rcss (auto-applied) */
+
+/* ── Alignment overrides ─────────────────────────────────
+   Force all prop-labels to a fixed column width so controls
+   (sliders, dropdowns, number inputs) all start at the same x.
+   Also cancel the base margin-top on range inputs which would
+   vertically offset sliders relative to other control types.   */
+
+.prop-label {
+    width: 125dp;
+    min-width: 125dp;
+    max-width: 125dp;
+}
+
+.setting-slider {
+    margin-top: 0;
+}
+
+.setting-row select {
+    flex: 1;
+    min-width: 0;
+}
+
+/* Section spacing overrides — prevent cramped headers and clipped text */
+.section-header {
+    padding: 5dp 4dp;
+    margin-top: 4dp;
+    line-height: 1.4;
+}
+
+.section-content {
+    padding-top: 4dp;
+    padding-bottom: 4dp;
+}
+
+.setting-row {
+    margin-bottom: 4dp;
+    line-height: 1.4;
+}
+
+.setting-row .prop-label {
+    line-height: 1.4;
+}
+
+.section-arrow {
+    line-height: 1.4;
+}
+
+.dense-title {
+    display: block;
+    font-size: 12dp;
+    font-weight: bold;
+    margin-bottom: 2dp;
+}
+
+.dense-subtitle {
+    display: block;
+    font-size: 9dp;
+    margin-bottom: 4dp;
+}
+
+.dense-status {
+    display: block;
+    font-size: 10dp;
+    margin-bottom: 2dp;
+}
+
+.dense-section-label {
+    display: block;
+    font-size: 10dp;
+    font-weight: bold;
+    margin-bottom: 4dp;
+    margin-top: 2dp;
+}
+
+.dense-help {
+    display: block;
+    font-size: 9dp;
+    margin-top: 2dp;
+    line-height: 1.35;
+}
+
+.dense-action-btn {
+    margin-top: 4dp;
+}
+
+.dense-stage {
+    display: block;
+    font-size: 10dp;
+    margin-bottom: 4dp;
+}
+
+.dense-progress-wrap {
+    position: relative;
+    margin-bottom: 4dp;
+}
+
+.dense-progress {
+    width: 100%;
+    height: 16dp;
+}
+
+.dense-status-msg {
+    display: block;
+    font-size: 9dp;
+    margin-bottom: 4dp;
+}
+
+.dense-result {
+    display: block;
+    font-size: 10dp;
+    margin-bottom: 2dp;
+}
+
+.dense-error-detail {
+    display: block;
+    font-size: 9dp;
+    margin-top: 2dp;
+    word-break: break-all;
+}
+
+.status-warning {
+    display: block;
+    font-size: 10dp;
+    color: #ff9933;
+    margin-bottom: 4dp;
+}

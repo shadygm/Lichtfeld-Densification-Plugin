@@ -8,6 +8,7 @@ from .densification import (
     DensifyJob,
     DensifyStage,
 )
+from .debug_matches import DebugMatchesPanel
 
 from ..core.config import DensePipelineConfig
 
