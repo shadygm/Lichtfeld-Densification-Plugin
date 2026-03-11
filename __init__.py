@@ -26,7 +26,7 @@ def on_load():
     for cls in _classes:
         lf.register_class(cls)
     # Debug panel starts hidden; toggled by the debug checkbox
-    lf.ui.set_panel_enabled(DebugMatchesPanel.idname, False)
+    lf.ui.set_panel_enabled(DebugMatchesPanel.id, False)
     lf.log.info("Dense Initialization plugin loaded")
 
 

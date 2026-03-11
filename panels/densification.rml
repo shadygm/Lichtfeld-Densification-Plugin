@@ -1,7 +1,4 @@
 <rml>
-<head>
-  <link type="text/rcss" href="densification.rcss"/>
-</head>
 <body data-model="densification">
 <div id="content-wrap">
 <div id="content">

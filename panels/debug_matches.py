@@ -6,19 +6,17 @@ from pathlib import Path
 from typing import Optional
 
 import lichtfeld as lf
-from lfs_plugins.types import RmlPanel
 
 from ..core.debug_viz import MatchDebugState, MatchPreview
 
 
-class DebugMatchesPanel(RmlPanel):
-    idname = "densify.debug_matches"
+class DebugMatchesPanel(lf.ui.Panel):
+    id = "densify.debug_matches"
     label = "Debug Matches"
-    space = "FLOATING"
+    space = lf.ui.PanelSpace.FLOATING
     order = 99
-    rml_template = str(Path(__file__).resolve().with_name("debug_matches.rml"))
-    initial_width = 340
-    initial_height = 220
+    size = (340.0, 220.0)
+    template = str(Path(__file__).resolve().with_name("debug_matches.rml"))
     update_interval_ms = 100
 
     # Shared debug state – set by DensificationPanel before enabling
@@ -35,10 +33,9 @@ class DebugMatchesPanel(RmlPanel):
     def set_debug_state(cls, state: MatchDebugState) -> None:
         cls._debug_state = state
 
-    # ── RmlPanel lifecycle ──────────────────────────────
+    # ── Retained lifecycle ──────────────────────────────
 
-    def on_load(self, doc):
-        super().on_load(doc)
+    def on_mount(self, doc):
         self._doc = doc
 
     def on_bind_model(self, ctx):
@@ -80,7 +77,7 @@ class DebugMatchesPanel(RmlPanel):
             return True
         return False
 
-    def on_unload(self, doc):
+    def on_unmount(self, doc):
         doc.remove_data_model("debug_matches")
         self._handle = None
         self._doc = None

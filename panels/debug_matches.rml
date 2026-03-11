@@ -1,7 +1,4 @@
 <rml>
-<head>
-  <link type="text/rcss" href="debug_matches.rcss"/>
-</head>
 <body data-model="debug_matches" class="debug-panel">
 
   <div data-if="!has_preview">

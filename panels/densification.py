@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Callable, Optional, List, ClassVar
 
 import lichtfeld as lf
-from lfs_plugins.types import RmlPanel
 
 from ..core.config import DensePipelineConfig
 from ..core.debug_viz import MatchDebugState
@@ -267,7 +266,7 @@ class DensifyJob:
                 self.debug_state.release_waiters()
 
 
-class DensificationPanel(RmlPanel):
+class DensificationPanel(lf.ui.Panel):
     """GUI panel for dense point cloud initialization workflow.
 
     This panel uses cameras already loaded in LichtFeld Studio.
@@ -275,12 +274,12 @@ class DensificationPanel(RmlPanel):
     The resulting dense point cloud will be automatically added to the scene.
     """
 
-    idname = "densification.main"
+    id = "densification.main"
     label = "Dense Initialization"
-    space = "MAIN_PANEL_TAB"
+    space = lf.ui.PanelSpace.MAIN_PANEL_TAB
     order = 21
-    rml_template = str(Path(__file__).resolve().with_name("densification.rml"))
-    rml_height_mode = "content"
+    template = str(Path(__file__).resolve().with_name("densification.rml"))
+    height_mode = lf.ui.PanelHeightMode.CONTENT
     update_interval_ms = 100
 
     _ROMA_SETTINGS = ["high", "base", "fast", "turbo"]
@@ -364,10 +363,9 @@ class DensificationPanel(RmlPanel):
         for f in fields:
             self._handle.dirty(f)
 
-    # ── RmlPanel lifecycle ───────────────────────────────
+    # ── Retained lifecycle ───────────────────────────────
 
-    def on_load(self, doc):
-        super().on_load(doc)
+    def on_mount(self, doc):
         self._doc = doc
         self._sync_section_states()
 
@@ -541,7 +539,7 @@ class DensificationPanel(RmlPanel):
         if self._handle:
             self._dirty("has_scene", "camera_count_text", "has_masks", "use_masks")
 
-    def on_unload(self, doc):
+    def on_unmount(self, doc):
         doc.remove_data_model("densification")
         self._handle = None
         self._doc = None
@@ -631,7 +629,7 @@ class DensificationPanel(RmlPanel):
             self.debug_state.release_waiters()
         # Share state and toggle floating debug panel
         DebugMatchesPanel.set_debug_state(self.debug_state)
-        lf.ui.set_panel_enabled(DebugMatchesPanel.idname, self._debug_enabled)
+        lf.ui.set_panel_enabled(DebugMatchesPanel.id, self._debug_enabled)
         self._dirty("debug_enabled")
 
     def _set_distance_filter_enabled(self, value):
