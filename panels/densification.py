@@ -390,6 +390,7 @@ class DensificationPanel(lf.ui.Panel):
         self._target_point_cloud_name: Optional[str] = None
         self._base_point_cloud_points = None
         self._base_point_cloud_colors = None
+        self._active_run_roi_only_selected: Optional[bool] = None
         self._preview_override_active = False
 
         self._collapsed = {"cameras", "filtering", "output", "debug"}
@@ -492,22 +493,10 @@ class DensificationPanel(lf.ui.Panel):
             return "ROI mode: select at least 2 cameras in the scene graph."
         return f"Scene mode: using all {total} cameras for densification."
 
-    def _clone_array_like(self, value):
-        if value is None:
-            return None
-        clone = getattr(value, "clone", None)
-        if callable(clone):
-            try:
-                return clone()
-            except Exception:
-                pass
-        copy = getattr(value, "copy", None)
-        if callable(copy):
-            try:
-                return copy()
-            except Exception:
-                pass
-        return value
+    def _run_roi_only_selected(self) -> bool:
+        if self._active_run_roi_only_selected is not None:
+            return self._active_run_roi_only_selected
+        return bool(self.config.roi_only_selected)
 
     @staticmethod
     def _row_count(data) -> int:
@@ -630,29 +619,6 @@ class DensificationPanel(lf.ui.Panel):
         if hasattr(value, "numpy") and callable(value.numpy):
             return np.asarray(value.numpy(copy=True))
         return np.asarray(value)
-
-    @staticmethod
-    def _concat_rows(base, extra):
-        if base is None:
-            return extra
-        if extra is None:
-            return base
-        if DensificationPanel._is_lf_tensor(base) or DensificationPanel._is_lf_tensor(extra):
-            merged_np = np.concatenate(
-                (
-                    DensificationPanel._to_numpy_array(base),
-                    DensificationPanel._to_numpy_array(extra),
-                ),
-                axis=0,
-            )
-            return lf.Tensor.from_numpy(merged_np, copy=True)
-        if torch.is_tensor(base):
-            extra_t = extra if torch.is_tensor(extra) else torch.as_tensor(extra)
-            extra_t = extra_t.to(device=base.device, dtype=base.dtype)
-            return torch.cat((base, extra_t), dim=0)
-        base_np = np.asarray(base)
-        extra_np = np.asarray(extra)
-        return np.concatenate((base_np, extra_np), axis=0)
 
     def _restore_base_point_cloud(self):
         if self._base_point_cloud_points is None or self._base_point_cloud_colors is None:
@@ -888,6 +854,7 @@ class DensificationPanel(lf.ui.Panel):
             self.last_result = self.job.result or DensifyResult(success=False, error="Cancelled")
             if self._preview_override_active:
                 self._restore_base_point_cloud()
+            self._active_run_roi_only_selected = None
             self._dirty("show_results", "show_error", "error_text", "show_idle", "show_running")
             dirty = True
 
@@ -904,6 +871,7 @@ class DensificationPanel(lf.ui.Panel):
             self._target_point_cloud_name = None
             self._base_point_cloud_points = None
             self._base_point_cloud_colors = None
+            self._active_run_roi_only_selected = None
             self._preview_override_active = False
         if self._handle:
             self._dirty(
@@ -1060,6 +1028,9 @@ class DensificationPanel(lf.ui.Panel):
             self._dirty("use_masks")
 
     def _set_roi_only_selected(self, value):
+        if self._is_running():
+            self._dirty("roi_only_selected")
+            return
         enabled = bool(value)
         if enabled == self.config.roi_only_selected:
             return
@@ -1193,6 +1164,7 @@ class DensificationPanel(lf.ui.Panel):
         self.debug_state.set_enabled(self._debug_enabled)
         self.debug_state.set_auto_step(self._debug_auto_step)
         self.debug_state.release_waiters()
+        self._active_run_roi_only_selected = bool(self.config.roi_only_selected)
 
         config = replace(
             self.config,
@@ -1214,9 +1186,10 @@ class DensificationPanel(lf.ui.Panel):
 
     def _on_complete(self, result: DensifyResult):
         base_count = self._row_count(self._base_point_cloud_points)
-        if self.config.roi_only_selected and base_count > 0 and result.success:
+        run_roi_only_selected = self._run_roi_only_selected()
+        if run_roi_only_selected and base_count > 0 and result.success:
             result.num_points = base_count + result.num_points
-        if self.config.roi_only_selected:
+        if run_roi_only_selected:
             lf.log.info(f"Densification complete: {result.num_points:,} points after ROI merge")
         else:
             lf.log.info(f"Densification complete: {result.num_points:,} points after overwrite")
@@ -1228,6 +1201,7 @@ class DensificationPanel(lf.ui.Panel):
         lf.log.error(f"Densification failed: {error}")
         if self._preview_override_active:
             self._restore_base_point_cloud()
+        self._active_run_roi_only_selected = None
         self.last_result = DensifyResult(success=False, error=str(error))
 
     def _import_ply(self, ply_path: str):
@@ -1256,7 +1230,8 @@ class DensificationPanel(lf.ui.Panel):
                 lf.log.error(f"Node '{target.name}' has no point cloud data")
                 return
 
-            if self.config.roi_only_selected:
+            run_roi_only_selected = self._run_roi_only_selected()
+            if run_roi_only_selected:
                 merged_points_np, merged_colors_np = self._build_roi_merge_arrays(
                     dense_points,
                     dense_colors,
@@ -1277,6 +1252,8 @@ class DensificationPanel(lf.ui.Panel):
 
             scene.notify_changed()
             self._preview_override_active = True
+            if not self._is_running() and not self._pending_import:
+                self._active_run_roi_only_selected = None
 
         except Exception as e:
             lf.log.error(f"Failed to import PLY: {e}")
