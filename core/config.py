@@ -8,6 +8,7 @@ from dataclasses import dataclass
 class DensePipelineConfig:
     output_path: str
     roma_setting: str = "fast"
+    roi_only_selected: bool = False
     num_refs: float = 0.8
     nns_per_ref: int = 3
     matches_per_ref: int = 10000

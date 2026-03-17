@@ -18,10 +18,77 @@ from pathlib import Path
 from typing import Callable, Optional, List, ClassVar
 
 import lichtfeld as lf
+import numpy as np
+import torch
+
+try:
+    from lfs_plugins import ScrubFieldController, ScrubFieldSpec
+except ImportError:
+    from lfs_plugins.scrub_fields import ScrubFieldController, ScrubFieldSpec
 
 from ..core.config import DensePipelineConfig
 from ..core.debug_viz import MatchDebugState
 from .debug_matches import DebugMatchesPanel
+
+
+SCRUB_FIELD_SPECS = {
+    "certainty_thresh": ScrubFieldSpec(
+        min_value=0.0,
+        max_value=1.0,
+        step=0.01,
+        fmt="%.2f",
+        data_type=float,
+    ),
+    "num_refs": ScrubFieldSpec(
+        min_value=0.1,
+        max_value=1.0,
+        step=0.01,
+        fmt="%.2f",
+        data_type=float,
+    ),
+    "nns_per_ref": ScrubFieldSpec(
+        min_value=1.0,
+        max_value=10.0,
+        step=1.0,
+        fmt="%d",
+        data_type=int,
+    ),
+    "reproj_thresh": ScrubFieldSpec(
+        min_value=0.1,
+        max_value=5.0,
+        step=0.1,
+        fmt="%.1f",
+        data_type=float,
+    ),
+    "sampson_thresh": ScrubFieldSpec(
+        min_value=0.0,
+        max_value=10.0,
+        step=0.5,
+        fmt="%.1f",
+        data_type=float,
+    ),
+    "min_parallax_deg": ScrubFieldSpec(
+        min_value=0.0,
+        max_value=5.0,
+        step=0.1,
+        fmt="%.1f",
+        data_type=float,
+    ),
+    "voxel_size": ScrubFieldSpec(
+        min_value=0.001,
+        max_value=0.1,
+        step=0.001,
+        fmt="%.3f",
+        data_type=float,
+    ),
+    "viz_interval": ScrubFieldSpec(
+        min_value=0.0,
+        max_value=10.0,
+        step=1.0,
+        fmt="%d",
+        data_type=int,
+    ),
+}
 
 
 class DensifyStage(Enum):
@@ -60,6 +127,7 @@ class DensifyJob:
     def __init__(
         self,
         config: DensePipelineConfig,
+        camera_nodes: Optional[List] = None,
         on_progress: Optional[Callable[[str, float, str], None]] = None,
         on_complete: Optional[Callable[[DensifyResult], None]] = None,
         on_error: Optional[Callable[[Exception], None]] = None,
@@ -67,6 +135,7 @@ class DensifyJob:
         debug_state: Optional[MatchDebugState] = None,
     ):
         self.config = config
+        self.camera_nodes = list(camera_nodes) if camera_nodes is not None else None
         self.on_progress = on_progress
         self.on_complete = on_complete
         self.on_error = on_error
@@ -169,14 +238,17 @@ class DensifyJob:
                 with self._lock:
                     return self._cancelled
 
-            self._update(DensifyStage.LOADING, 5.0, "Loading cameras from scene...")
+            scope_label = "selected ROI cameras" if self.config.roi_only_selected else "scene cameras"
+            self._update(DensifyStage.LOADING, 5.0, f"Loading {scope_label}...")
             if check_cancelled():
                 self._update(DensifyStage.CANCELLED, 0.0, "Cancelled")
                 return
 
-            # Get cameras from scene graph (each camera is a node with has_camera=True)
-            scene = lf.get_scene()
-            camera_nodes = [n for n in scene.get_nodes() if n.has_camera]
+            if self.camera_nodes is None:
+                scene = lf.get_scene()
+                camera_nodes = [n for n in scene.get_nodes() if n.has_camera]
+            else:
+                camera_nodes = list(self.camera_nodes)
             if not camera_nodes:
                 raise RuntimeError("No cameras found in scene. Please load a dataset first.")
             
@@ -309,6 +381,17 @@ class DensificationPanel(lf.ui.Panel):
 
         self.config = DensePipelineConfig(output_path=self._get_temp_output_path())
         self._voxel_size_ui = 0.01  # remembered slider value when filter is toggled
+        self._scrub_fields = ScrubFieldController(
+            specs=SCRUB_FIELD_SPECS,
+            get_value=self._get_scrub_field_value,
+            set_value=self._set_scrub_field_value,
+        )
+
+        self._target_point_cloud_name: Optional[str] = None
+        self._base_point_cloud_points = None
+        self._base_point_cloud_colors = None
+        self._active_run_roi_only_selected: Optional[bool] = None
+        self._preview_override_active = False
 
         self._collapsed = {"cameras", "filtering", "output", "debug"}
 
@@ -320,6 +403,8 @@ class DensificationPanel(lf.ui.Panel):
         self._last_has_result = False
         self._last_has_error = False
         self._last_camera_count = -1
+        self._last_selected_camera_count = -1
+        self._last_effective_camera_count = -1
         self._last_has_masks = False
 
     # ── Helpers ──────────────────────────────────────────
@@ -354,6 +439,214 @@ class DensificationPanel(lf.ui.Panel):
         except Exception:
             return 0
 
+    def _get_camera_nodes(self):
+        try:
+            scene = lf.get_scene()
+            if scene is None:
+                return []
+            return [n for n in scene.get_nodes() if n.has_camera]
+        except Exception:
+            return []
+
+    def _get_selected_camera_nodes(self):
+        try:
+            scene = lf.get_scene()
+            if scene is None:
+                return []
+            selected_names = list(getattr(lf, "get_selected_node_names", lambda: [])() or [])
+            selected_nodes = []
+            seen = set()
+            for name in selected_names:
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                try:
+                    node = scene.get_node(name)
+                except Exception:
+                    node = None
+                if node is not None and getattr(node, "has_camera", False):
+                    selected_nodes.append(node)
+            return selected_nodes
+        except Exception:
+            return []
+
+    def _get_selected_camera_count(self) -> int:
+        return len(self._get_selected_camera_nodes())
+
+    def _get_effective_camera_nodes(self):
+        if self.config.roi_only_selected:
+            return self._get_selected_camera_nodes()
+        return self._get_camera_nodes()
+
+    def _get_effective_camera_count(self) -> int:
+        return len(self._get_effective_camera_nodes())
+
+    def _nns_per_ref_max(self) -> int:
+        return max(1, min(10, self._get_effective_camera_count() - 1))
+
+    def _camera_scope_text(self) -> str:
+        total = self._get_camera_count()
+        selected = self._get_selected_camera_count()
+        if self.config.roi_only_selected:
+            if selected >= 2:
+                return f"ROI mode: using only the {selected} selected cameras."
+            return "ROI mode: select at least 2 cameras in the scene graph."
+        return f"Scene mode: using all {total} cameras for densification."
+
+    def _run_roi_only_selected(self) -> bool:
+        if self._active_run_roi_only_selected is not None:
+            return self._active_run_roi_only_selected
+        return bool(self.config.roi_only_selected)
+
+    @staticmethod
+    def _row_count(data) -> int:
+        shape = getattr(data, "shape", None)
+        if shape is None or len(shape) == 0:
+            return 0
+        return int(shape[0])
+
+    @staticmethod
+    def _read_point_cloud_field(point_cloud, field_name: str):
+        value = getattr(point_cloud, field_name, None)
+        if callable(value):
+            return value()
+        return value
+
+    @staticmethod
+    def _coerce_point_cloud_array(value, field_name: str) -> np.ndarray:
+        arr = np.asarray(DensificationPanel._to_numpy_array(value))
+        if arr.ndim != 2:
+            raise RuntimeError(
+                f"Point cloud field '{field_name}' must be 2D, got shape {arr.shape!r}"
+            )
+        return np.array(arr, copy=True)
+
+    def _build_roi_merge_arrays(self, dense_points, dense_colors):
+        if self._base_point_cloud_points is None or self._base_point_cloud_colors is None:
+            raise RuntimeError("ROI merge snapshot is missing.")
+
+        dense_points_np = self._coerce_point_cloud_array(dense_points, "dense_points")
+        dense_colors_np = self._coerce_point_cloud_array(dense_colors, "dense_colors")
+        base_points_np = self._coerce_point_cloud_array(self._base_point_cloud_points, "base_points")
+        base_colors_np = self._coerce_point_cloud_array(self._base_point_cloud_colors, "base_colors")
+
+        merged_points_np = np.concatenate((dense_points_np, base_points_np), axis=0)
+        merged_colors_np = np.concatenate((dense_colors_np, base_colors_np), axis=0)
+        return merged_points_np, merged_colors_np
+
+    def _capture_base_point_cloud(self) -> bool:
+        scene = lf.get_scene()
+        if scene is None:
+            self.last_result = DensifyResult(success=False, error="No scene available.")
+            return False
+
+        target = self._find_target_point_cloud_node(scene)
+        if target is None:
+            self.last_result = DensifyResult(
+                success=False,
+                error="No point cloud node found to merge into.",
+            )
+            return False
+
+        point_cloud = target.point_cloud()
+        if point_cloud is None:
+            self.last_result = DensifyResult(
+                success=False,
+                error=f"Node '{target.name}' has no point cloud data.",
+            )
+            return False
+
+        self._target_point_cloud_name = target.name
+        self._base_point_cloud_points = self._coerce_point_cloud_array(
+            self._read_point_cloud_field(point_cloud, "means"),
+            "means",
+        )
+        self._base_point_cloud_colors = self._coerce_point_cloud_array(
+            self._read_point_cloud_field(point_cloud, "colors"),
+            "colors",
+        )
+        self._preview_override_active = False
+
+        if self._base_point_cloud_points is None or self._base_point_cloud_colors is None:
+            self.last_result = DensifyResult(
+                success=False,
+                error="Failed to read the original point cloud data.",
+            )
+            return False
+        return True
+
+    def _resolve_target_point_cloud_node(self, scene):
+        if scene is None:
+            return None
+        if self._target_point_cloud_name:
+            try:
+                target = scene.get_node(self._target_point_cloud_name)
+            except Exception:
+                target = None
+            if target is not None and target.type == lf.scene.NodeType.POINTCLOUD:
+                return target
+        return self._find_target_point_cloud_node(scene)
+
+    @staticmethod
+    def _find_target_point_cloud_node(scene):
+        for node in scene.get_nodes():
+            if node.type == lf.scene.NodeType.POINTCLOUD:
+                return node
+        return None
+
+    @staticmethod
+    def _is_lf_tensor(value) -> bool:
+        tensor_type = getattr(lf, "Tensor", None)
+        if tensor_type is None:
+            return False
+        try:
+            return isinstance(value, tensor_type)
+        except TypeError:
+            return False
+
+    @staticmethod
+    def _to_lf_tensor(value, *, copy: bool = True):
+        if DensificationPanel._is_lf_tensor(value):
+            return value.clone() if copy and hasattr(value, "clone") else value
+        return lf.Tensor.from_numpy(np.asarray(value), copy=copy)
+
+    @staticmethod
+    def _to_numpy_array(value):
+        if DensificationPanel._is_lf_tensor(value):
+            return np.asarray(value.numpy(copy=True))
+        if torch.is_tensor(value):
+            return value.detach().cpu().numpy()
+        if hasattr(value, "numpy") and callable(value.numpy):
+            return np.asarray(value.numpy(copy=True))
+        return np.asarray(value)
+
+    def _restore_base_point_cloud(self):
+        if self._base_point_cloud_points is None or self._base_point_cloud_colors is None:
+            return
+        try:
+            scene = lf.get_scene()
+            target = self._resolve_target_point_cloud_node(scene)
+            if target is None:
+                return
+            point_cloud = target.point_cloud()
+            if point_cloud is None:
+                return
+            point_cloud.set_data(
+                lf.Tensor.from_numpy(np.array(self._base_point_cloud_points, copy=True), copy=True),
+                lf.Tensor.from_numpy(np.array(self._base_point_cloud_colors, copy=True), copy=True),
+            )
+            scene.notify_changed()
+            self._preview_override_active = False
+        except Exception as exc:
+            lf.log.warn(f"Failed to restore original point cloud: {exc}")
+
+    @staticmethod
+    def _set_point_cloud_data(point_cloud, points, colors):
+        point_cloud.set_data(
+            DensificationPanel._to_lf_tensor(points, copy=True),
+            DensificationPanel._to_lf_tensor(colors, copy=True),
+        )
+
     def _dirty(self, *fields):
         if not self._handle:
             return
@@ -367,6 +660,7 @@ class DensificationPanel(lf.ui.Panel):
 
     def on_mount(self, doc):
         self._doc = doc
+        self._scrub_fields.mount(doc)
         self._sync_section_states()
 
     def on_bind_model(self, ctx):
@@ -378,6 +672,11 @@ class DensificationPanel(lf.ui.Panel):
         model.bind_func("has_scene", self._has_training_data)
         model.bind_func("camera_count_text",
                         lambda: f"Scene loaded with {self._get_camera_count()} cameras")
+        model.bind_func("selected_camera_text",
+                        lambda: f"Selected cameras: {self._get_selected_camera_count()}")
+        model.bind_func("camera_scope_text", self._camera_scope_text)
+        model.bind_func("show_roi_selection_warning",
+                        lambda: self.config.roi_only_selected and self._get_selected_camera_count() < 2)
 
         # --- Quality setting ---
         model.bind("roma_setting",
@@ -389,6 +688,9 @@ class DensificationPanel(lf.ui.Panel):
         model.bind("use_masks",
                     lambda: self.config.use_masks,
                     self._set_use_masks)
+        model.bind("roi_only_selected",
+                    lambda: self.config.roi_only_selected,
+                    self._set_roi_only_selected)
 
         # --- Slider-bound config values ---
         model.bind("num_refs",
@@ -396,7 +698,7 @@ class DensificationPanel(lf.ui.Panel):
                     lambda v: self._set_float_config("num_refs", v, 0.1, 1.0))
         model.bind("nns_per_ref",
                     lambda: str(self.config.nns_per_ref),
-                    lambda v: self._set_int_config("nns_per_ref", v, 1, 10))
+                    lambda v: self._set_int_config("nns_per_ref", v, 1, self._nns_per_ref_max()))
         model.bind("certainty_thresh",
                     lambda: f"{self.config.certainty_thresh:.2f}",
                     lambda v: self._set_float_config("certainty_thresh", v, 0.0, 1.0))
@@ -484,6 +786,11 @@ class DensificationPanel(lf.ui.Panel):
 
         dirty = False
 
+        if self._sync_scrub_specs():
+            dirty = True
+        if self._scrub_fields.sync_all():
+            dirty = True
+
         # Track running state changes
         running = self._is_running()
         if running != self._last_running:
@@ -522,6 +829,18 @@ class DensificationPanel(lf.ui.Panel):
             self._dirty("has_scene", "camera_count_text")
             dirty = True
 
+        selected_cam_count = self._get_selected_camera_count()
+        if selected_cam_count != self._last_selected_camera_count:
+            self._last_selected_camera_count = selected_cam_count
+            self._dirty("selected_camera_text", "camera_scope_text", "show_roi_selection_warning")
+            dirty = True
+
+        effective_cam_count = self._get_effective_camera_count()
+        if effective_cam_count != self._last_effective_camera_count:
+            self._last_effective_camera_count = effective_cam_count
+            self._dirty("camera_scope_text", "nns_per_ref")
+            dirty = True
+
         # Track mask availability changes
         has_masks = self._has_masks()
         if has_masks != self._last_has_masks:
@@ -531,16 +850,44 @@ class DensificationPanel(lf.ui.Panel):
             self._dirty("has_masks", "use_masks")
             dirty = True
 
+        if self.job and self.job.stage == DensifyStage.CANCELLED and self.last_result is None:
+            self.last_result = self.job.result or DensifyResult(success=False, error="Cancelled")
+            if self._preview_override_active:
+                self._restore_base_point_cloud()
+            self._active_run_roi_only_selected = None
+            self._dirty("show_results", "show_error", "error_text", "show_idle", "show_running")
+            dirty = True
+
         return dirty
 
     def on_scene_changed(self, doc):
         self._last_camera_count = -1
+        self._last_selected_camera_count = -1
+        self._last_effective_camera_count = -1
         self._last_has_masks = not self._has_masks()  # force redirty next update
+        # Keep the ROI snapshot alive while a densification job is active or
+        # while sequential previews/final import are still being applied.
+        if not self._is_running() and not self._pending_import:
+            self._target_point_cloud_name = None
+            self._base_point_cloud_points = None
+            self._base_point_cloud_colors = None
+            self._active_run_roi_only_selected = None
+            self._preview_override_active = False
         if self._handle:
-            self._dirty("has_scene", "camera_count_text", "has_masks", "use_masks")
+            self._dirty(
+                "has_scene",
+                "camera_count_text",
+                "selected_camera_text",
+                "camera_scope_text",
+                "show_roi_selection_warning",
+                "has_masks",
+                "use_masks",
+                "nns_per_ref",
+            )
 
     def on_unmount(self, doc):
         doc.remove_data_model("densification")
+        self._scrub_fields.unmount()
         self._handle = None
         self._doc = None
 
@@ -587,6 +934,85 @@ class DensificationPanel(lf.ui.Panel):
         if header:
             header.set_class("is-expanded", expanding)
 
+    def _get_scrub_field_value(self, prop: str) -> float:
+        if prop == "num_refs":
+            return float(self.config.num_refs)
+        if prop == "nns_per_ref":
+            return float(self.config.nns_per_ref)
+        if prop == "certainty_thresh":
+            return float(self.config.certainty_thresh)
+        if prop == "reproj_thresh":
+            return float(self.config.reproj_thresh)
+        if prop == "sampson_thresh":
+            return float(self.config.sampson_thresh)
+        if prop == "min_parallax_deg":
+            return float(self.config.min_parallax_deg)
+        if prop == "voxel_size":
+            return float(self._voxel_size_ui)
+        if prop == "viz_interval":
+            return float(self.config.viz_interval)
+        raise KeyError(prop)
+
+    def _set_scrub_field_value(self, prop: str, value: float) -> None:
+        if prop == "num_refs":
+            self._set_float_config("num_refs", value, 0.1, 1.0)
+            return
+        if prop == "nns_per_ref":
+            self._set_int_config("nns_per_ref", value, 1, self._nns_per_ref_max())
+            return
+        if prop == "certainty_thresh":
+            self._set_float_config("certainty_thresh", value, 0.0, 1.0)
+            return
+        if prop == "reproj_thresh":
+            self._set_float_config("reproj_thresh", value, 0.1, 5.0)
+            return
+        if prop == "sampson_thresh":
+            self._set_float_config("sampson_thresh", value, 0.0, 10.0)
+            return
+        if prop == "min_parallax_deg":
+            self._set_float_config("min_parallax_deg", value, 0.0, 5.0)
+            return
+        if prop == "voxel_size":
+            self._set_voxel_size(value)
+            return
+        if prop == "viz_interval":
+            self._set_int_config("viz_interval", value, 0, 10)
+            return
+        raise KeyError(prop)
+
+    def _sync_scrub_specs(self) -> bool:
+        changed = self._update_scrub_spec(
+            "nns_per_ref",
+            max_value=float(self._nns_per_ref_max()),
+        )
+        max_nns = self._nns_per_ref_max()
+        if self.config.nns_per_ref > max_nns:
+            self.config.nns_per_ref = max_nns
+            self._dirty("nns_per_ref")
+            changed = True
+        return changed
+
+    def _update_scrub_spec(self, prop: str, *, max_value: float) -> bool:
+        current_spec = self._scrub_fields._specs[prop]
+        if abs(current_spec.max_value - max_value) <= 1.0e-9:
+            return False
+
+        next_spec = ScrubFieldSpec(
+            min_value=current_spec.min_value,
+            max_value=max_value,
+            step=current_spec.step,
+            fmt=current_spec.fmt,
+            data_type=current_spec.data_type,
+            pixels_per_step=current_spec.pixels_per_step,
+        )
+        self._scrub_fields._specs[prop] = next_spec
+
+        state = self._scrub_fields._fields.get(prop)
+        if state is not None:
+            state.spec = next_spec
+
+        return True
+
     # ── Config setters ───────────────────────────────────
 
     def _set_roma_setting(self, value):
@@ -600,6 +1026,19 @@ class DensificationPanel(lf.ui.Panel):
         if v != self.config.use_masks:
             self.config.use_masks = v
             self._dirty("use_masks")
+
+    def _set_roi_only_selected(self, value):
+        if self._is_running():
+            self._dirty("roi_only_selected")
+            return
+        enabled = bool(value)
+        if enabled == self.config.roi_only_selected:
+            return
+        self.config.roi_only_selected = enabled
+        max_nns = self._nns_per_ref_max()
+        if self.config.nns_per_ref > max_nns:
+            self.config.nns_per_ref = max_nns
+        self._dirty("roi_only_selected", "camera_scope_text", "show_roi_selection_warning", "nns_per_ref")
 
     def _set_float_config(self, attr, value, vmin, vmax):
         try:
@@ -704,11 +1143,28 @@ class DensificationPanel(lf.ui.Panel):
             )
             return
 
+        camera_nodes = self._get_effective_camera_nodes()
+        if self.config.roi_only_selected and len(camera_nodes) < 2:
+            self.last_result = DensifyResult(
+                success=False,
+                error="ROI densification requires at least 2 selected cameras.",
+            )
+            return
+        if len(camera_nodes) < 2:
+            self.last_result = DensifyResult(
+                success=False,
+                error="Need at least 2 cameras for densification.",
+            )
+            return
+        if not self._capture_base_point_cloud():
+            return
+
         self.last_result = None
 
         self.debug_state.set_enabled(self._debug_enabled)
         self.debug_state.set_auto_step(self._debug_auto_step)
         self.debug_state.release_waiters()
+        self._active_run_roi_only_selected = bool(self.config.roi_only_selected)
 
         config = replace(
             self.config,
@@ -717,6 +1173,7 @@ class DensificationPanel(lf.ui.Panel):
 
         self.job = DensifyJob(
             config=config,
+            camera_nodes=camera_nodes,
             on_complete=self._on_complete,
             on_error=self._on_error,
             on_sequential_viz=self._on_sequential_viz,
@@ -728,17 +1185,27 @@ class DensificationPanel(lf.ui.Panel):
         self._pending_import = ply_path
 
     def _on_complete(self, result: DensifyResult):
-        lf.log.info(f"Densification complete: {result.num_points:,} points")
+        base_count = self._row_count(self._base_point_cloud_points)
+        run_roi_only_selected = self._run_roi_only_selected()
+        if run_roi_only_selected and base_count > 0 and result.success:
+            result.num_points = base_count + result.num_points
+        if run_roi_only_selected:
+            lf.log.info(f"Densification complete: {result.num_points:,} points after ROI merge")
+        else:
+            lf.log.info(f"Densification complete: {result.num_points:,} points after overwrite")
         self.last_result = result
         if self._auto_import and result.output_path:
             self._pending_import = result.output_path
 
     def _on_error(self, error: Exception):
         lf.log.error(f"Densification failed: {error}")
+        if self._preview_override_active:
+            self._restore_base_point_cloud()
+        self._active_run_roi_only_selected = None
         self.last_result = DensifyResult(success=False, error=str(error))
 
     def _import_ply(self, ply_path: str):
-        """Replace the existing point cloud node with the dense PLY data."""
+        """Import the latest dense PLY into the active point cloud."""
         if not ply_path or not os.path.exists(ply_path):
             lf.log.warn(f"PLY file not found: {ply_path}")
             return
@@ -751,34 +1218,42 @@ class DensificationPanel(lf.ui.Panel):
                 lf.log.error("No scene available")
                 return
 
-            target = None
-            for n in scene.get_nodes():
-                if n.type == lf.scene.NodeType.POINTCLOUD:
-                    target = n
-                    break
-
+            target = self._resolve_target_point_cloud_node(scene)
             if not target:
-                lf.log.error("No point cloud node found to replace")
+                lf.log.error("No point cloud node found to merge into")
                 return
 
-            means, colors = lf.io.load_point_cloud(ply_path)
+            dense_points, dense_colors = lf.io.load_point_cloud(ply_path)
 
-            lf.log.debug(
-                f"Loaded PLY: {means.shape[0]:,} points, "
-                f"bounds=[{means.min(0).numpy()}, {means.max(0).numpy()}]"
-            )
-
-            pc = target.point_cloud()
-            if not pc:
+            point_cloud = target.point_cloud()
+            if not point_cloud:
                 lf.log.error(f"Node '{target.name}' has no point cloud data")
                 return
 
-            pc.set_data(means, colors)
+            run_roi_only_selected = self._run_roi_only_selected()
+            if run_roi_only_selected:
+                merged_points_np, merged_colors_np = self._build_roi_merge_arrays(
+                    dense_points,
+                    dense_colors,
+                )
+                self._set_point_cloud_data(point_cloud, merged_points_np, merged_colors_np)
+                out_points = merged_points_np
+                lf.log.debug(
+                    f"Merged ROI dense cloud into '{target.name}' "
+                    f"({self._row_count(out_points):,} total points)"
+                )
+            else:
+                self._set_point_cloud_data(point_cloud, dense_points, dense_colors)
+                out_points = dense_points
+                lf.log.debug(
+                    f"Overwrote '{target.name}' with dense cloud "
+                    f"({self._row_count(out_points):,} points)"
+                )
 
-            lf.log.debug(
-                f"Replaced '{target.name}' with dense cloud "
-                f"({means.shape[0]:,} points)"
-            )
+            scene.notify_changed()
+            self._preview_override_active = True
+            if not self._is_running() and not self._pending_import:
+                self._active_run_roi_only_selected = None
 
         except Exception as e:
             lf.log.error(f"Failed to import PLY: {e}")

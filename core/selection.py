@@ -59,6 +59,10 @@ def nearest_neighbors(flat_poses: np.ndarray, k: int) -> np.ndarray:
     import torch
 
     matrix = torch.from_numpy(flat_poses.astype(np.float32))
+    n = int(matrix.shape[0])
+    if n <= 1:
+        return np.empty((n, 0), dtype=np.int64)
+    k = max(1, min(int(k), n - 1))
     with torch.no_grad():
         dist = torch.cdist(matrix, matrix, p=2)
         dist.fill_diagonal_(float("inf"))
