@@ -8,8 +8,9 @@ _Based on [bounty #2](https://github.com/MrNeRF/LichtFeld-Studio/pull/413)._
 ## Features
 
 - **RoMa v2 Matching**
-- **Configurable Parameters via GUI**
 - **Live Reconstruction Updates**
+- **Configurable Parameters via GUI**
+- **Densify Regions from Camera Subsets**
 - **Scene Integration**
 - **Installable via LFS Plugin Marketplace**
 
@@ -33,10 +34,11 @@ git clone https://github.com/shadygm/lichtfeld-densification-plugin.git ~/.licht
 
 1. Open the **Dense Initialization** panel (side panel).
 2. Ensure a scene is loaded in LichtFeld-Studio.
-3. Optional: Configure settings (e.g., RoMa quality, reference fraction, filtering thresholds).
-4. Click **Start Densification**.
-5. Monitor progress.
-6. To reuse the result, right-click the point cloud in the scene graph and select **Save to Disk**.
+3. Optional: Select a subset of cameras in the scene graph and keep **ROI: Selected Cameras Only** enabled to densify only that region of views.
+4. Optional: Configure settings (e.g., RoMa quality, reference fraction, filtering thresholds) using the scrub controls.
+5. Click **Start Densification**.
+6. Monitor progress.
+7. To reuse the result, right-click the point cloud in the scene graph and select **Save to Disk**.
 
 ## Configuration
 
@@ -57,6 +59,12 @@ git clone https://github.com/shadygm/lichtfeld-densification-plugin.git ~/.licht
 - **No Filter**: Disable all geometric checks for raw output.
 
 Adjust these in the GUI's Advanced Settings.
+
+### Camera Selection
+
+- **Selected Cameras Only**: Use only the currently selected cameras for densification.
+- **Reference Fraction**: Fraction of active cameras used as reference views.
+- **Neighbors per Ref**: Number of nearest neighbor views matched per reference.
 
 ## Results
 
