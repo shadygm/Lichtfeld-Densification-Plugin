@@ -25,9 +25,89 @@ body {
     margin-top: 0;
 }
 
+.setting-row > .setting-slider,
+.setting-row > .scrub-field {
+    flex: 1;
+    min-width: 0;
+}
+
 .setting-row select {
     flex: 1;
     min-width: 0;
+}
+
+.slider-value {
+    width: 48dp;
+    min-width: 48dp;
+    margin-left: 8dp;
+    text-align: right;
+    flex-shrink: 0;
+}
+
+.scrub-field {
+    position: relative;
+    min-width: 0;
+    height: 24dp;
+    border-radius: 6dp;
+    background: rgba(255, 255, 255, 0.05);
+    cursor: ew-resize;
+    overflow: hidden;
+}
+
+.scrub-field-fill {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 0%;
+    background: linear-gradient(90deg, rgba(84, 170, 255, 0.34), rgba(84, 170, 255, 0.14));
+}
+
+.scrub-field-display {
+    display: block;
+    position: absolute;
+    left: 8dp;
+    right: 8dp;
+    top: 4dp;
+    bottom: 4dp;
+    font-size: 9dp;
+    line-height: 16dp;
+    color: #d7dde5;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+.scrub-field-input {
+    position: absolute;
+    left: 0;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    padding: 4dp 8dp;
+    background: transparent;
+    color: #d7dde5;
+    opacity: 0;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+.scrub-field.is-dragging {
+    background: rgba(84, 170, 255, 0.16);
+}
+
+.scrub-field.is-editing {
+    background: rgba(84, 170, 255, 0.10);
+    cursor: text;
+}
+
+.scrub-field.is-editing .scrub-field-display {
+    opacity: 0;
+}
+
+.scrub-field.is-editing .scrub-field-input {
+    opacity: 1;
 }
 
 /* Section spacing overrides — prevent cramped headers and clipped text */

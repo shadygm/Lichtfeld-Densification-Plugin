@@ -120,6 +120,12 @@ def _apply_point_cap(
     return xyz, rgb, err
 
 
+def _effective_neighbor_count(requested: int, camera_count: int) -> int:
+    if camera_count <= 1:
+        return 0
+    return max(1, min(int(requested), camera_count - 1))
+
+
 def _write_output(path: str, xyz: np.ndarray, rgb: np.ndarray, err: np.ndarray) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     rgb_uint8 = to_uint8_rgb(rgb)
@@ -261,7 +267,15 @@ def dense_init_from_lfs(
     flat_poses = _flat_pose_stack(records)
     num_refs = int(round(config.num_refs * len(records))) if config.num_refs <= 1.0 else int(config.num_refs)
     refs_local = select_cameras_kcenters(flat_poses, max(1, num_refs))
-    nn_table = nearest_neighbors(flat_poses, max(1, config.nns_per_ref))
+    effective_nns = _effective_neighbor_count(config.nns_per_ref, len(records))
+    if effective_nns < 1:
+        return 1, "Need at least 2 cameras for dense initialization"
+    if effective_nns != int(config.nns_per_ref):
+        lf.log.info(
+            "Clamping neighbors per reference from "
+            f"{config.nns_per_ref} to {effective_nns} for {len(records)} ROI cameras"
+        )
+    nn_table = nearest_neighbors(flat_poses, effective_nns)
 
     lf.log.info(f"Prepared {len(records)} cameras (refs={len(refs_local)})")
 

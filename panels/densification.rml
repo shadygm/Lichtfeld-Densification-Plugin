@@ -19,6 +19,9 @@
   <div data-if="has_scene">
 
     <span class="dense-status text-default">{{camera_count_text}}</span>
+    <span class="dense-status text-muted">{{selected_camera_text}}</span>
+    <span class="dense-help text-muted">{{camera_scope_text}}</span>
+    <span class="status-text status-warning" data-if="show_roi_selection_warning">Select at least 2 cameras to run ROI densification.</span>
 
     <div class="separator"></div>
 
@@ -62,6 +65,12 @@
       <span>Camera Selection</span>
     </div>
     <div class="section-content collapsed" id="sec-cameras">
+      <div class="setting-row" title="When enabled, densification uses only the currently selected camera nodes in the scene graph.">
+        <label class="setting-label">
+          <input type="checkbox" data-checked="roi_only_selected" />
+          <span>ROI: Selected Cameras Only</span>
+        </label>
+      </div>
       <div class="setting-row" title="Fraction of cameras to use as reference views. Higher values use more pairs but take longer.">
         <span class="prop-label">Reference Fraction</span>
         <input type="range" class="setting-slider" data-value="num_refs" min="0.1" max="1.0" step="0.01" />
@@ -175,7 +184,7 @@
     <div data-if="show_results">
       <div class="separator"></div>
       <span class="dense-section-label text-accent">Results</span>
-      <span class="dense-result text-default">Points generated: {{result_points}}</span>
+      <span class="dense-result text-default">Final point count: {{result_points}}</span>
       <span class="dense-result text-default">Time: {{result_time}}</span>
     </div>
 
