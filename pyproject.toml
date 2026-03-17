@@ -1,9 +1,9 @@
-# SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
+# SPDX-FileCopyrightText: 2025 Shady Gmira
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 [project]
 name = "densification"
-version = "0.8.0"
+version = "0.8.1"
 description = "Dense point cloud initialization using RoMa v2 matching"
 authors = [{ name = "Shady Gmira" }]
 

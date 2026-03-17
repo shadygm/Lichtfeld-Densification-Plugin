@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
+# SPDX-FileCopyrightText: 2025 Shady Gmira
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Dense Point Cloud Initialization Panel using RoMa v2.
 
