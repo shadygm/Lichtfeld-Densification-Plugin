@@ -3,7 +3,7 @@
 
 [project]
 name = "densification"
-version = "0.8.1"
+version = "0.8.2"
 description = "Dense point cloud initialization using RoMa v2 matching"
 authors = [{ name = "Shady Gmira" }]
 
