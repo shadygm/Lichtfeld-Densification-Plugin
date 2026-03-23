@@ -8,9 +8,9 @@ simply load your scene, adjust parameters if desired, and click Start.
 """
 
 import os
-import tempfile
 import threading
 import time
+import uuid
 import weakref
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -410,8 +410,27 @@ class DensificationPanel(lf.ui.Panel):
     # ── Helpers ──────────────────────────────────────────
 
     @staticmethod
+    def _get_cache_dir() -> str:
+        base = os.path.expanduser("~/.lichtfeld/cache")
+        Path(base).mkdir(parents=True, exist_ok=True)
+        return base
+
+    @staticmethod
     def _get_temp_output_path() -> str:
-        return os.path.join(tempfile.gettempdir(), "lfs_dense_init.ply")
+        return os.path.join(DensificationPanel._get_cache_dir(), f"dense_{uuid.uuid4().hex}.ply")
+
+    @staticmethod
+    def _cleanup_cache(max_age_seconds: float = 3600.0):
+        cache_dir = DensificationPanel._get_cache_dir()
+        now = time.time()
+
+        for file_name in os.listdir(cache_dir):
+            path = os.path.join(cache_dir, file_name)
+            try:
+                if os.path.isfile(path) and now - os.path.getmtime(path) > max_age_seconds:
+                    os.remove(path)
+            except Exception:
+                pass
 
     def _has_training_data(self) -> bool:
         try:
@@ -661,6 +680,7 @@ class DensificationPanel(lf.ui.Panel):
     def on_mount(self, doc):
         self._doc = doc
         self._scrub_fields.mount(doc)
+        self._cleanup_cache()
         self._sync_section_states()
 
     def on_bind_model(self, ctx):
@@ -1257,3 +1277,11 @@ class DensificationPanel(lf.ui.Panel):
 
         except Exception as e:
             lf.log.error(f"Failed to import PLY: {e}")
+        finally:
+            if os.environ.get("LFS_KEEP_TEMP"):
+                return
+            try:
+                if os.path.exists(ply_path):
+                    os.remove(ply_path)
+            except Exception:
+                lf.log.warn(f"Failed to delete temp file: {ply_path}")
