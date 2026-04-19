@@ -3,7 +3,7 @@
 
 [project]
 name = "densification"
-version = "0.8.2"
+version = "0.8.3"
 description = "Dense point cloud initialization using RoMa v2 matching"
 authors = [{ name = "Shady Gmira" }]
 
@@ -11,7 +11,8 @@ dependencies = [
     "torch",
     "torchvision",
     "numpy==2.4.1",
-    "pycolmap",
+    "pycolmap @ https://github.com/lyehe/build_gpu_colmap/releases/download/v4.0.2/pycolmap-4.0.2%2Bcu128.bundled.cudss-cp312-cp312-manylinux_2_35_x86_64.whl ; platform_system=='Linux'",
+    "pycolmap @ https://github.com/lyehe/build_gpu_colmap/releases/download/v4.0.2/pycolmap-4.0.2%2Bcuda.cudss-cp312-cp312-win_amd64.whl ; platform_system=='Windows'",
     "Pillow",
     "scipy",
     "tqdm",
