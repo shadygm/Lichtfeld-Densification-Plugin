@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import gc
+import hashlib
+import json
 import os
 import sys
+import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import lichtfeld as lf
 import numpy as np
@@ -113,6 +117,7 @@ def _build_camera_records_from_colmap(
                 t=t,
                 P=P,
                 C=C,
+                colmap_camera=cam,
             )
         )
     return records, img_ids
@@ -128,6 +133,8 @@ def _select_reference_indices(
     img_ids: List[int],
     num_refs: int,
 ) -> List[int]:
+    if num_refs >= len(img_ids):
+        return list(range(len(img_ids)))
     idx_map = {iid: i for i, iid in enumerate(img_ids)}
     try:
         refs = select_cameras_by_visibility(rec, num_refs)
@@ -225,6 +232,420 @@ def _cancel_requested(cancel_requested: Optional[Callable[[], bool]]) -> bool:
         return False
 
 
+def _split_refs_local(refs_local: Sequence[int], chunk_count: int) -> List[List[int]]:
+    chunks = np.array_split(np.asarray(list(refs_local), dtype=np.int64), max(1, int(chunk_count)))
+    return [chunk.astype(np.int64).tolist() for chunk in chunks if chunk.size > 0]
+
+
+def _chunk_output_dir(output_path: str) -> str:
+    output = Path(output_path)
+    return str(output.with_suffix("")) + "_chunks"
+
+
+def _jsonable_array(value: np.ndarray) -> List[Any]:
+    return np.asarray(value).tolist()
+
+
+def _camera_record_fingerprint(record: CameraRecord) -> Dict[str, Any]:
+    camera = getattr(record, "colmap_camera", None)
+    camera_model = ""
+    camera_params: List[float] = []
+    if camera is not None:
+        camera_model = str(getattr(camera, "model", ""))
+        if hasattr(getattr(camera, "model", None), "name"):
+            camera_model = str(camera.model.name)
+        if hasattr(camera, "params"):
+            camera_params = [float(v) for v in np.asarray(camera.params, dtype=np.float64).reshape(-1)]
+
+    return {
+        "uid": int(record.uid),
+        "image_path": str(record.image_path),
+        "mask_path": str(record.mask_path) if record.mask_path is not None else None,
+        "width": int(record.width),
+        "height": int(record.height),
+        "K": _jsonable_array(np.asarray(record.K, dtype=np.float64)),
+        "R": _jsonable_array(np.asarray(record.R, dtype=np.float64)),
+        "t": _jsonable_array(np.asarray(record.t, dtype=np.float64)),
+        "C": _jsonable_array(np.asarray(record.C, dtype=np.float64)),
+        "camera_model": camera_model,
+        "camera_params": camera_params,
+    }
+
+
+def _chunk_run_manifest(
+    records: Sequence[CameraRecord],
+    refs_local: Sequence[int],
+    nn_table: np.ndarray,
+    config: DensePipelineConfig,
+    chunk_count: int,
+    max_points_per_batch: int,
+    chunks: Sequence[Sequence[int]],
+) -> Dict[str, Any]:
+    refs = [int(v) for v in refs_local]
+    nn_table_arr = np.asarray(nn_table)
+    ref_neighbor_rows = {
+        str(ref): [int(v) for v in nn_table_arr[int(ref)].reshape(-1).tolist()]
+        for ref in refs
+    }
+    return {
+        "schema": "densification.chunked_resume.v1",
+        "records": [_camera_record_fingerprint(record) for record in records],
+        "refs_local": refs,
+        "ref_neighbor_rows": ref_neighbor_rows,
+        "chunks": [[int(v) for v in chunk] for chunk in chunks],
+        "options": {
+            "roma_setting": str(config.roma_setting),
+            "num_refs": float(config.num_refs),
+            "nns_per_ref": int(config.nns_per_ref),
+            "matches_per_ref": int(config.matches_per_ref),
+            "certainty_thresh": float(config.certainty_thresh),
+            "reproj_thresh": float(config.reproj_thresh),
+            "sampson_thresh": float(config.sampson_thresh),
+            "min_parallax_deg": float(config.min_parallax_deg),
+            "max_points": int(config.max_points),
+            "min_track_length": int(config.min_track_length),
+            "no_filter": bool(config.no_filter),
+            "use_masks": bool(config.use_masks),
+            "voxel_size": float(config.voxel_size),
+            "seed": int(config.seed),
+            "prefetch_packages": int(config.prefetch_packages),
+            "pack_workers": int(config.pack_workers),
+            "chunk_count": int(chunk_count),
+            "max_points_per_batch": int(max_points_per_batch),
+        },
+    }
+
+
+def _canonical_json(data: Dict[str, Any]) -> str:
+    return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _chunk_run_fingerprint(manifest: Dict[str, Any]) -> str:
+    return hashlib.sha256(_canonical_json(manifest).encode("utf-8")).hexdigest()
+
+
+def _chunk_metadata(
+    manifest: Dict[str, Any],
+    fingerprint: str,
+    chunk_idx: int,
+    chunk_refs: Sequence[int],
+) -> Dict[str, Any]:
+    return {
+        "schema": "densification.chunk.v1",
+        "run_fingerprint": fingerprint,
+        "run_manifest": manifest,
+        "chunk_index": int(chunk_idx),
+        "chunk_refs": [int(v) for v in chunk_refs],
+    }
+
+
+def _save_npz_chunk(
+    path_out: str,
+    xyz: np.ndarray,
+    rgb: np.ndarray,
+    metadata: Dict[str, Any],
+) -> int:
+    os.makedirs(os.path.dirname(path_out), exist_ok=True)
+    rgb_uint8 = to_uint8_rgb(rgb)
+    np.savez(
+        path_out,
+        xyz=xyz.astype(np.float32, copy=False),
+        rgb=rgb_uint8,
+        metadata_json=np.asarray(_canonical_json(metadata)),
+    )
+    return int(xyz.shape[0])
+
+
+def _npz_chunk_count(path_in: str) -> int:
+    with np.load(path_in) as data:
+        return int(data["xyz"].shape[0])
+
+
+def _load_existing_chunk(path_in: str, expected_metadata: Dict[str, Any]) -> Optional[int]:
+    if not os.path.isfile(path_in):
+        return None
+    try:
+        with np.load(path_in) as data:
+            xyz = data["xyz"]
+            rgb = data["rgb"]
+            if xyz.ndim != 2 or xyz.shape[1] != 3:
+                return None
+            if rgb.ndim != 2 or rgb.shape[1] != 3:
+                return None
+            if rgb.shape[0] != xyz.shape[0]:
+                return None
+            if "metadata_json" not in data:
+                lf.log.warn(f"Could not reuse existing chunk {path_in}: missing chunk metadata")
+                return None
+            try:
+                metadata = json.loads(str(data["metadata_json"].item()))
+            except Exception:
+                lf.log.warn(f"Could not reuse existing chunk {path_in}: invalid chunk metadata")
+                return None
+            if metadata != expected_metadata:
+                lf.log.warn(f"Could not reuse existing chunk {path_in}: fingerprint mismatch")
+                return None
+            count = int(xyz.shape[0])
+            return count
+    except Exception as exc:
+        lf.log.warn(f"Could not reuse existing chunk {path_in}: {exc}")
+        return None
+
+
+def _write_ply_vertices(file_obj, xyz: np.ndarray, rgb_uint8: np.ndarray) -> None:
+    if xyz.shape[0] == 0:
+        return
+    if rgb_uint8.dtype != np.uint8:
+        rgb_uint8 = to_uint8_rgb(rgb_uint8)
+    packed = np.empty(
+        xyz.shape[0],
+        dtype=[
+            ("x", "<f4"),
+            ("y", "<f4"),
+            ("z", "<f4"),
+            ("red", "u1"),
+            ("green", "u1"),
+            ("blue", "u1"),
+        ],
+    )
+    xyz32 = xyz.astype(np.float32, copy=False)
+    packed["x"] = xyz32[:, 0]
+    packed["y"] = xyz32[:, 1]
+    packed["z"] = xyz32[:, 2]
+    packed["red"] = rgb_uint8[:, 0]
+    packed["green"] = rgb_uint8[:, 1]
+    packed["blue"] = rgb_uint8[:, 2]
+    packed.tofile(file_obj)
+
+
+def _write_ply_from_npz_chunks(
+    output_path: str,
+    chunk_paths: Sequence[str],
+    max_points: int,
+    seed: int,
+) -> Tuple[int, int]:
+    counts = [_npz_chunk_count(path) for path in chunk_paths]
+    total = int(sum(counts))
+    if total <= 0:
+        raise RuntimeError("No points remain after chunked densification.")
+
+    output_count = total
+    selected_global: Optional[np.ndarray] = None
+    if max_points > 0 and total > int(max_points):
+        output_count = int(max_points)
+        selected_global = np.sort(
+            np.random.default_rng(seed).choice(total, size=output_count, replace=False)
+        )
+
+    header = f"""ply
+format binary_little_endian 1.0
+element vertex {output_count}
+property float x
+property float y
+property float z
+property uchar red
+property uchar green
+property uchar blue
+end_header
+"""
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "wb") as f:
+        f.write(header.encode("ascii"))
+        global_offset = 0
+        selected_pos = 0
+        for path, count in zip(chunk_paths, counts):
+            if count <= 0:
+                continue
+            local_idx = None
+            if selected_global is not None:
+                start = selected_pos
+                while selected_pos < selected_global.size and selected_global[selected_pos] < global_offset + count:
+                    selected_pos += 1
+                if selected_pos == start:
+                    global_offset += count
+                    continue
+                local_idx = selected_global[start:selected_pos] - global_offset
+
+            with np.load(path) as data:
+                xyz = data["xyz"]
+                rgb = data["rgb"]
+                if local_idx is not None:
+                    xyz = xyz[local_idx]
+                    rgb = rgb[local_idx]
+                _write_ply_vertices(f, xyz, rgb)
+            global_offset += count
+
+    return output_count, total
+
+
+def _run_dense_pipeline_chunked(
+    records: List[CameraRecord],
+    refs_local: Sequence[int],
+    nn_table: np.ndarray,
+    config: DensePipelineConfig,
+    chunk_count: int,
+    max_points_per_batch: int,
+    resume_chunks: bool,
+    progress_callback: Optional[Callable[[float, str], None]],
+    debug_state=None,
+    cancel_requested: Optional[Callable[[], bool]] = None,
+) -> int:
+    if not config.output_path.lower().endswith(".ply"):
+        raise RuntimeError("Chunked CLI densification currently supports PLY output only.")
+
+    from .core.pipeline import PipelineCancelled, run_dense_pipeline
+
+    chunks = _split_refs_local(refs_local, chunk_count)
+    chunk_dir = _chunk_output_dir(config.output_path)
+    os.makedirs(chunk_dir, exist_ok=True)
+    run_manifest = _chunk_run_manifest(
+        records,
+        refs_local,
+        nn_table,
+        config,
+        chunk_count,
+        max_points_per_batch,
+        chunks,
+    )
+    run_fingerprint = _chunk_run_fingerprint(run_manifest)
+    lf.log.info(
+        f"Chunked densification enabled: {len(chunks)} chunks, "
+        f"global refs={len(refs_local)}, neighbors remain global, "
+        f"fingerprint={run_fingerprint[:12]}"
+    )
+    if progress_callback:
+        progress_callback(5.0, f"Chunked densification: {len(chunks)} chunks")
+
+    chunk_paths: List[str] = []
+    chunk_counts: List[int] = []
+    for chunk_idx, chunk_refs in enumerate(chunks, start=1):
+        chunk_path = os.path.join(chunk_dir, f"chunk_{chunk_idx:04d}.npz")
+        chunk_metadata = _chunk_metadata(run_manifest, run_fingerprint, chunk_idx, chunk_refs)
+        if resume_chunks:
+            existing_count = _load_existing_chunk(chunk_path, chunk_metadata)
+            if existing_count is not None:
+                chunk_paths.append(chunk_path)
+                chunk_counts.append(existing_count)
+                lf.log.info(
+                    f"Chunk {chunk_idx}/{len(chunks)} reused "
+                    f"{existing_count:,} points -> {chunk_path}"
+                )
+                if progress_callback:
+                    progress_callback(
+                        5.0 + (chunk_idx / max(1, len(chunks))) * 88.0,
+                        f"Reused chunk {chunk_idx}/{len(chunks)} ({existing_count:,} points)",
+                    )
+                continue
+
+        if _cancel_requested(cancel_requested):
+            if progress_callback:
+                progress_callback(0.0, "Cancelled")
+            return 2
+
+        lf.log.info(
+            f"Chunk {chunk_idx}/{len(chunks)}: processing {len(chunk_refs)} reference views"
+        )
+
+        def chunk_progress(pct: float, msg: str, _idx=chunk_idx, _total=len(chunks)) -> None:
+            if progress_callback is None:
+                return
+            chunk_base = 5.0 + ((_idx - 1) / max(1, _total)) * 88.0
+            chunk_span = 88.0 / max(1, _total)
+            mapped_pct = chunk_base + (float(pct) / 100.0) * chunk_span
+            progress_callback(mapped_pct, f"Matching chunk {_idx}/{_total}: {msg}")
+
+        try:
+            result = run_dense_pipeline(
+                records,
+                chunk_refs,
+                nn_table,
+                config,
+                progress_callback=chunk_progress,
+                on_sequential_viz=None,
+                debug_state=debug_state,
+                cancel_requested=cancel_requested,
+            )
+        except PipelineCancelled:
+            if progress_callback:
+                progress_callback(0.0, "Cancelled")
+            return 2
+        except RuntimeError as exc:
+            gc.collect()
+            raise RuntimeError(
+                f"Chunk {chunk_idx}/{len(chunks)} failed; final PLY was not written. "
+                "Completed chunks remain available for --resume_chunks."
+            ) from exc
+
+        tracks_before = [list(track) for track in result.tracks]
+        xyz, rgb, err, tracks = _apply_track_filter(
+            result.xyz,
+            result.rgb,
+            result.err,
+            result.tracks,
+            config.min_track_length,
+        )
+        _log_track_filter_stats(
+            f"Chunk {chunk_idx}/{len(chunks)} track filter",
+            tracks_before,
+            tracks,
+            config.min_track_length,
+        )
+        if xyz.shape[0] == 0:
+            lf.log.warn(f"Chunk {chunk_idx}/{len(chunks)} produced no points after filtering.")
+            empty_rgb = np.empty((0, 3), dtype=np.uint8)
+            count = _save_npz_chunk(chunk_path, xyz, empty_rgb, chunk_metadata)
+            chunk_paths.append(chunk_path)
+            chunk_counts.append(count)
+            lf.log.info(f"Chunk {chunk_idx}/{len(chunks)} saved empty completion marker -> {chunk_path}")
+            del result, tracks_before, xyz, rgb, err, tracks
+            gc.collect()
+            continue
+
+        if max_points_per_batch > 0:
+            xyz, rgb, err, tracks = _apply_point_cap(
+                xyz,
+                rgb,
+                err,
+                tracks,
+                int(max_points_per_batch),
+                config.seed + chunk_idx,
+            )
+
+        count = _save_npz_chunk(chunk_path, xyz, rgb, chunk_metadata)
+        chunk_paths.append(chunk_path)
+        chunk_counts.append(count)
+        lf.log.info(f"Chunk {chunk_idx}/{len(chunks)} saved {count:,} points -> {chunk_path}")
+
+        del result, tracks_before, xyz, rgb, err, tracks
+        gc.collect()
+
+    if not chunk_paths:
+        raise RuntimeError("No points remain after chunked densification.")
+
+    if progress_callback:
+        progress_callback(94.0, "Merging chunked point output...")
+    output_path = config.output_path
+    tmp_output_path = output_path + ".tmp"
+    output_count, total_count = _write_ply_from_npz_chunks(
+        tmp_output_path,
+        chunk_paths,
+        config.max_points,
+        config.seed,
+    )
+    os.replace(tmp_output_path, output_path)
+    lf.log.info(
+        f"Chunked dense reconstruction finished: wrote {output_count:,}/{total_count:,} "
+        f"points from {len(chunk_paths)} chunks -> {output_path}"
+    )
+    lf.log.info(
+        "Chunk point counts: "
+        + ", ".join(f"{idx + 1}:{count:,}" for idx, count in enumerate(chunk_counts))
+    )
+    if progress_callback:
+        progress_callback(100.0, f"Done! {output_count:,} points")
+    return 0
+
+
 def dense_init(
     args,
     progress_callback: Optional[Callable[[float, str], None]] = None,
@@ -262,6 +683,20 @@ def dense_init(
         prefetch_packages=args.prefetch_packages,
         pack_workers=args.pack_workers,
     )
+
+    if int(getattr(args, "chunked_batches", 1)) > 1:
+        return _run_dense_pipeline_chunked(
+            records,
+            refs_local,
+            nn_table,
+            config,
+            int(args.chunked_batches),
+            int(getattr(args, "max_points_per_batch", 0)),
+            bool(getattr(args, "resume_chunks", False)),
+            progress_callback=progress_callback,
+            debug_state=debug_state,
+            cancel_requested=cancel_requested,
+        )
 
     from .core.pipeline import PipelineCancelled, run_dense_pipeline
 
@@ -512,6 +947,33 @@ def build_argparser():
         help="Optional cap on total points (0 = unlimited)",
     )
     ap.add_argument(
+        "--chunked_batches",
+        type=int,
+        default=1,
+        help=(
+            "Split selected reference views into this many RAM-safer chunks. "
+            "Neighbors remain global; <=1 keeps the legacy single-pass mode."
+        ),
+    )
+    ap.add_argument(
+        "--max_points_per_batch",
+        type=int,
+        default=0,
+        help=(
+            "Optional per-chunk point cap before chunk files are merged "
+            "(0 = no per-chunk cap; final --max_points still applies globally)."
+        ),
+    )
+    ap.add_argument(
+        "--resume_chunks",
+        action="store_true",
+        help=(
+            "Reuse existing chunk_XXXX.npz files only when their saved run "
+            "fingerprint matches the current reconstruction, chunk assignment, "
+            "and point-generating options."
+        ),
+    )
+    ap.add_argument(
         "--min_track_length",
         type=int,
         default=1,
@@ -533,6 +995,34 @@ def build_argparser():
     return ap
 
 
+def _cli_progress_callback() -> Callable[[float, str], None]:
+    last = {"pct": None, "msg": None, "matching_bucket": -1, "matching_time": 0.0}
+
+    def _report(pct: float, msg: str) -> None:
+        pct_f = float(pct)
+        msg_s = str(msg)
+        is_matching = msg_s.startswith("Matching ")
+        if is_matching:
+            now = time.time()
+            bucket = int(pct_f)
+            should_print = (
+                bucket > int(last["matching_bucket"])
+                or now - float(last["matching_time"]) >= 10.0
+                or pct_f >= 89.9
+            )
+            if not should_print:
+                return
+            last["matching_bucket"] = bucket
+            last["matching_time"] = now
+        if last["pct"] == pct_f and last["msg"] == msg_s:
+            return
+        last["pct"] = pct_f
+        last["msg"] = msg_s
+        print(f"[{pct_f:6.2f}%] {msg_s}", flush=True)
+
+    return _report
+
+
 if __name__ == "__main__":
     cli_args = build_argparser().parse_args()
-    raise SystemExit(dense_init(cli_args))
+    raise SystemExit(dense_init(cli_args, progress_callback=_cli_progress_callback()))

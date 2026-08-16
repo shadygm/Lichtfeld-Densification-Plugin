@@ -1,12 +1,29 @@
 """Geometry helpers for densification pipeline."""
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import numpy as np
 
 if TYPE_CHECKING:
     import pycolmap
+
+PINHOLE_CAMERA_MODELS = {"PINHOLE", "SIMPLE_PINHOLE"}
+
+
+def camera_model_name(cam: Optional[pycolmap.Camera]) -> str:
+    if cam is None:
+        return ""
+    try:
+        return str(cam.model.name).upper()
+    except Exception:
+        return str(getattr(cam, "model", "")).upper()
+
+
+def uses_distortion_aware_projection(cam: Optional[pycolmap.Camera]) -> bool:
+    """Return True when a COLMAP camera should not be reduced to a pinhole K matrix."""
+    model = camera_model_name(cam)
+    return bool(model) and model not in PINHOLE_CAMERA_MODELS
 
 
 def K_from_camera(cam: pycolmap.Camera) -> np.ndarray:
@@ -46,6 +63,10 @@ def pose_world2cam(im: pycolmap.Image) -> Tuple[np.ndarray, np.ndarray]:
 
 def P_from_KRt(K: np.ndarray, R: np.ndarray, t: np.ndarray) -> np.ndarray:
     return K @ np.concatenate([R, t], axis=1)
+
+
+def Rt_from_Rt(R: np.ndarray, t: np.ndarray) -> np.ndarray:
+    return np.concatenate([R, t], axis=1).astype(np.float32, copy=False)
 
 
 def cam_center_world(R: np.ndarray, t: np.ndarray) -> np.ndarray:
@@ -106,9 +127,63 @@ def reprojection_errors(P: np.ndarray, X: np.ndarray, uv: np.ndarray) -> np.ndar
     return np.sqrt(du * du + dv * dv)
 
 
+def unproject_pixels(cam: pycolmap.Camera, uv: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Unproject image pixels to COLMAP normalized camera coordinates.
+
+    ``pycolmap.Camera.cam_from_img`` applies the camera model, including
+    distortion/fisheye terms such as THIN_PRISM_FISHEYE. The returned 2D
+    coordinates live on the normalized camera plane and can be triangulated
+    with a plain [R|t] camera matrix.
+    """
+    uv64 = np.asarray(uv, dtype=np.float64)
+    out = cam.cam_from_img(uv64)
+    if out is None:
+        uv_cam = np.full((uv64.shape[0], 2), np.nan, dtype=np.float32)
+    else:
+        uv_cam = np.asarray(out, dtype=np.float32).reshape(-1, 2)
+    valid = np.isfinite(uv_cam).all(axis=1)
+    return uv_cam, valid
+
+
+def reprojection_errors_camera(
+    cam: pycolmap.Camera,
+    R: np.ndarray,
+    t: np.ndarray,
+    X: np.ndarray,
+    uv: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Project world points with a full COLMAP camera model and compare in pixels."""
+    X3 = np.asarray(X[:, :3], dtype=np.float64)
+    R64 = np.asarray(R, dtype=np.float64)
+    t64 = np.asarray(t, dtype=np.float64).reshape(1, 3)
+    X_cam = X3 @ R64.T + t64
+    try:
+        uv_pred_raw = cam.img_from_cam(X_cam)
+    except Exception:
+        uv_pred_raw = None
+
+    if uv_pred_raw is None:
+        uv_pred = np.full((X3.shape[0], 2), np.nan, dtype=np.float32)
+    else:
+        uv_pred = np.asarray(uv_pred_raw, dtype=np.float32).reshape(-1, 2)
+
+    valid = np.isfinite(uv_pred).all(axis=1) & (X_cam[:, 2] > 0.0)
+    du = uv_pred[:, 0] - uv[:, 0]
+    dv = uv_pred[:, 1] - uv[:, 1]
+    err = np.sqrt(du * du + dv * dv).astype(np.float32)
+    err[~valid] = np.inf
+    return err, valid
+
+
 def cheirality_mask(P: np.ndarray, X: np.ndarray) -> np.ndarray:
     Xh = X.T
     z = (P @ Xh)[2, :]
+    return z > 0.0
+
+
+def cheirality_mask_Rt(R: np.ndarray, t: np.ndarray, X: np.ndarray) -> np.ndarray:
+    X3 = np.asarray(X[:, :3], dtype=np.float32)
+    z = X3 @ R[2, :].T + float(np.asarray(t).reshape(3)[2])
     return z > 0.0
 
 

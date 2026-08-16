@@ -16,12 +16,18 @@ from PIL import Image
 from .camera_models import CameraRecord
 from .config import DensePipelineConfig
 from .geometry import (
+    Rt_from_Rt,
     cheirality_mask,
+    cheirality_mask_Rt,
+    camera_model_name,
     dlt_triangulate_batch,
     fundamental_from_world2cam,
     parallax_mask,
+    reprojection_errors_camera,
     reprojection_errors,
     sampson_error,
+    unproject_pixels,
+    uses_distortion_aware_projection,
 )
 from .image_utils import apply_mask_to_rgb, load_mask_resized_np, load_rgb_resized, to_uint8_rgb
 from .debug_viz import MatchPreview, MatchDebugState
@@ -76,6 +82,8 @@ class _CameraLookup:
     t_by: Dict[int, np.ndarray]
     P_by: Dict[int, np.ndarray]
     C_by: Dict[int, np.ndarray]
+    colmap_camera_by: Dict[int, object]
+    distortion_aware_by: Dict[int, bool]
 
 
 @dataclass(frozen=True)
@@ -281,6 +289,11 @@ def _build_camera_lookup(camera_records: List[CameraRecord]) -> _CameraLookup:
         t_by={cam.uid: cam.t for cam in camera_records},
         P_by={cam.uid: cam.P for cam in camera_records},
         C_by={cam.uid: cam.C for cam in camera_records},
+        colmap_camera_by={cam.uid: cam.colmap_camera for cam in camera_records if cam.colmap_camera is not None},
+        distortion_aware_by={
+            cam.uid: uses_distortion_aware_projection(cam.colmap_camera)
+            for cam in camera_records
+        },
     )
 
 
@@ -630,6 +643,8 @@ def _triangulate_ref(
     t_by = cameras.t_by
     P_by = cameras.P_by
     C_by = cameras.C_by
+    colmap_camera_by = cameras.colmap_camera_by
+    distortion_aware_by = cameras.distortion_aware_by
 
     warp_list = matched_ref.warp_list_cpu
     cert_list = matched_ref.cert_list_cpu
@@ -711,7 +726,12 @@ def _triangulate_ref(
         yA_pair = yA
         cert_pair = selected_certs[kidx]
 
-        if (not config.no_filter) and config.sampson_thresh > 0:
+        pair_uses_distortion_aware = bool(
+            distortion_aware_by.get(ref_id, False)
+            or distortion_aware_by.get(nbr_id, False)
+        )
+
+        if (not pair_uses_distortion_aware) and (not config.no_filter) and config.sampson_thresh > 0:
             F = fundamental_from_world2cam(
                 K_by[ref_id],
                 R_by[ref_id],
@@ -734,23 +754,73 @@ def _triangulate_ref(
         if idxs.size == 0:
             continue
 
-        P1, P2 = P_by[ref_id], P_by[nbr_id]
         uvA = uvA_full[idxs]
-        Xi = dlt_triangulate_batch(P1, P2, uvA, uvB)
+        P1, P2 = P_by[ref_id], P_by[nbr_id]
 
-        err1 = reprojection_errors(P1, Xi, uvA)
-        err2 = reprojection_errors(P2, Xi, uvB)
-        err = np.maximum(err1, err2)
+        if pair_uses_distortion_aware:
+            cam1 = colmap_camera_by.get(ref_id)
+            cam2 = colmap_camera_by.get(nbr_id)
+            if cam1 is None or cam2 is None:
+                lf.log.warn(
+                    "Distortion-aware triangulation requested but COLMAP camera "
+                    f"metadata is missing for pair {ref_id}->{nbr_id}; skipping pair."
+                )
+                continue
+
+            uvA_cam, validA = unproject_pixels(cam1, uvA)
+            uvB_cam, validB = unproject_pixels(cam2, uvB)
+            valid_uv = validA & validB
+            if not np.any(valid_uv):
+                continue
+
+            idxs = idxs[valid_uv]
+            uvA = uvA[valid_uv]
+            uvB = uvB[valid_uv]
+            uvA_used = uvA
+            uvB_used = uvB
+            uvA_cam = uvA_cam[valid_uv]
+            uvB_cam = uvB_cam[valid_uv]
+            xA_pair = xA_pair[valid_uv]
+            yA_pair = yA_pair[valid_uv]
+            xB = xB[valid_uv]
+            yB = yB[valid_uv]
+            cert_pair = cert_pair[valid_uv]
+            rgb_used = rgb_ref[idxs]
+
+            Rt1 = Rt_from_Rt(R_by[ref_id], t_by[ref_id])
+            Rt2 = Rt_from_Rt(R_by[nbr_id], t_by[nbr_id])
+            Xi = dlt_triangulate_batch(Rt1, Rt2, uvA_cam, uvB_cam)
+
+            err1, valid_proj1 = reprojection_errors_camera(
+                cam1, R_by[ref_id], t_by[ref_id], Xi, uvA_used
+            )
+            err2, valid_proj2 = reprojection_errors_camera(
+                cam2, R_by[nbr_id], t_by[nbr_id], Xi, uvB_used
+            )
+            err = np.maximum(err1, err2)
+            projection_valid = valid_proj1 & valid_proj2
+            cheirality_valid = cheirality_mask_Rt(R_by[ref_id], t_by[ref_id], Xi)
+            cheirality_valid &= cheirality_mask_Rt(R_by[nbr_id], t_by[nbr_id], Xi)
+        else:
+            Xi = dlt_triangulate_batch(P1, P2, uvA, uvB)
+
+            err1 = reprojection_errors(P1, Xi, uvA)
+            err2 = reprojection_errors(P2, Xi, uvB)
+            err = np.maximum(err1, err2)
+            projection_valid = np.isfinite(err)
+            cheirality_valid = cheirality_mask(P1, Xi)
+            cheirality_valid &= cheirality_mask(P2, Xi)
+            rgb_used = rgb_ref[idxs]
 
         if config.no_filter:
-            finite_mask = np.isfinite(Xi).all(axis=1) & np.isfinite(err)
+            finite_mask = np.isfinite(Xi).all(axis=1) & np.isfinite(err) & projection_valid
             if not np.any(finite_mask):
                 continue
             keep = finite_mask
         else:
-            keep = err <= float(config.reproj_thresh)
-            keep &= cheirality_mask(P1, Xi)
-            keep &= cheirality_mask(P2, Xi)
+            keep = np.isfinite(Xi).all(axis=1) & projection_valid
+            keep &= err <= float(config.reproj_thresh)
+            keep &= cheirality_valid
             if config.min_parallax_deg > 0:
                 keep &= parallax_mask(C_by[ref_id], C_by[nbr_id], Xi, min_deg=config.min_parallax_deg)
             if not np.any(keep):
@@ -797,6 +867,21 @@ def _triangulate_ref(
     out_err: List[float] = []
     out_tracks: List[List[Tuple[int, float, float]]] = []
 
+    def support_reprojection_error(image_id: int, Xh_point: np.ndarray, uv_obs: np.ndarray) -> float:
+        if distortion_aware_by.get(image_id, False):
+            cam = colmap_camera_by.get(image_id)
+            if cam is None:
+                return float("inf")
+            err_cam, _valid = reprojection_errors_camera(
+                cam,
+                R_by[image_id],
+                t_by[image_id],
+                Xh_point[None, :],
+                uv_obs[None, :],
+            )
+            return float(err_cam[0])
+        return float(reprojection_errors(P_by[image_id], Xh_point[None, :], uv_obs[None, :])[0])
+
     for sample_idx, candidates in enumerate(candidates_by_sample):
         if not candidates:
             continue
@@ -808,7 +893,7 @@ def _triangulate_ref(
         Xh = np.concatenate([Xw.astype(np.float32), np.ones((1,), dtype=np.float32)])
 
         ref_obs = uvA_full[sample_idx]
-        ref_err = reprojection_errors(P_by[ref_id], Xh[None, :], ref_obs[None, :])[0]
+        ref_err = support_reprojection_error(ref_id, Xh, ref_obs)
         if not config.no_filter and (not np.isfinite(ref_err) or ref_err > float(config.reproj_thresh)):
             continue
 
@@ -834,11 +919,11 @@ def _triangulate_ref(
             ) = candidate
             if nbr_id in used_images:
                 continue
-            nbr_err = reprojection_errors(
-                P_by[nbr_id],
-                Xh[None, :],
-                np.asarray([[uvb_x, uvb_y]], dtype=np.float32),
-            )[0]
+            nbr_err = support_reprojection_error(
+                nbr_id,
+                Xh,
+                np.asarray([uvb_x, uvb_y], dtype=np.float32),
+            )
             if not config.no_filter and (not np.isfinite(nbr_err) or nbr_err > float(config.reproj_thresh)):
                 continue
             used_images.add(nbr_id)
@@ -895,6 +980,25 @@ def run_dense_pipeline(
     np.random.seed(config.seed)
 
     cameras = _build_camera_lookup(camera_records)
+    distortion_models = sorted(
+        {
+            camera_model_name(cameras.colmap_camera_by[uid])
+            for uid, enabled in cameras.distortion_aware_by.items()
+            if enabled and uid in cameras.colmap_camera_by
+        }
+    )
+    if distortion_models:
+        msg = "Distortion-aware COLMAP projection enabled: " + ", ".join(distortion_models)
+        lf.log.info(msg)
+        if progress_callback is not None:
+            progress_callback(3.0, msg)
+        if config.sampson_thresh > 0:
+            lf.log.info(
+                "Sampson pre-filter is skipped for distortion-aware camera pairs; "
+                "reprojection, cheirality, and parallax filters remain active."
+            )
+            if progress_callback is not None:
+                progress_callback(4.0, "Sampson filter skipped for distorted/fisheye camera pairs")
     total_pairs_est = _estimate_total_pairs(refs_local, nn_table, cameras.img_ids, config.nns_per_ref)
     if debug_state:
         debug_state.set_total_pairs(total_pairs_est)
