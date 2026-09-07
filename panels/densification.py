@@ -391,6 +391,7 @@ class DensificationPanel(lf.ui.Panel):
     template = str(Path(__file__).resolve().with_name("densification.rml"))
     height_mode = lf.ui.PanelHeightMode.CONTENT
     update_interval_ms = 100
+    update_policy = "interval"
 
     _ROMA_SETTINGS = ["high", "base", "fast", "turbo"]
     _ROMA_DESCRIPTIONS = {
