@@ -14,6 +14,7 @@ dependencies = [
     "pycolmap @ https://github.com/lyehe/build_gpu_colmap/releases/download/v4.0.2/pycolmap-4.0.2%2Bcu128.bundled.cudss-cp312-cp312-manylinux_2_35_x86_64.whl ; platform_system=='Linux'",
     "pycolmap @ https://github.com/lyehe/build_gpu_colmap/releases/download/v4.0.2/pycolmap-4.0.2%2Bcuda.cudss-cp312-cp312-win_amd64.whl ; platform_system=='Windows'",
     "Pillow",
+    "OpenEXR>=3.3",
     "scipy",
     "tqdm",
     "einops>=0.8.1",
