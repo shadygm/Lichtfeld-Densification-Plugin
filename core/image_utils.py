@@ -26,6 +26,49 @@ def to_uint8_rgb(arr_float01: np.ndarray) -> np.ndarray:
     return np.clip(np.round(arr_float01 * 255.0), 0, 255).astype(np.uint8)
 
 
+def _load_exr(path: str) -> Image.Image:
+    """Load an OpenEXR file (any compression) as an 8-bit RGB PIL image.
+
+    Pillow has no EXR decoder. Linear values are clipped to [0, 1] without a
+    transfer curve, matching how LichtFeld feeds EXR pixels to training.
+    """
+    import OpenEXR
+
+    with OpenEXR.File(path, separate_channels=True) as exr:
+        channels = {name: ch.pixels for name, ch in exr.channels().items()}
+
+    def pick(suffix: str) -> Optional[np.ndarray]:
+        if suffix in channels:
+            return channels[suffix]
+        for name in sorted(channels):
+            if name.rsplit(".", 1)[-1] == suffix:
+                return channels[name]
+        return None
+
+    if all(name in channels for name in ("R", "G", "B")):
+        r, g, b = (channels[name] for name in ("R", "G", "B"))
+    else:
+        prefixes = sorted({name.rsplit(".", 1)[0] for name in channels if name.endswith(".R")})
+        prefix = next((p for p in prefixes if all(f"{p}.{suffix}" in channels for suffix in ("R", "G", "B"))), None)
+        if prefix is not None:
+            r, g, b = (channels[f"{prefix}.{suffix}"] for suffix in ("R", "G", "B"))
+        else:
+            y = pick("Y")
+            if y is None:
+                raise ValueError(f"EXR has no RGB or Y channels: {sorted(channels)}")
+            r = g = b = y
+    rgb = np.stack([r, g, b], axis=-1).astype(np.float32)
+    rgb = np.nan_to_num(rgb, nan=0.0, posinf=1.0, neginf=0.0)
+    return Image.fromarray(to_uint8_rgb(rgb), mode="RGB")
+
+
+def _open_image(path: str) -> Image.Image:
+    """Open an image with Pillow, routing EXR files through OpenEXR."""
+    if path.lower().endswith(".exr"):
+        return _load_exr(path)
+    return Image.open(path)
+
+
 def find_image(root: str, name: str) -> str:
     """Find an image on disk using absolute or basename lookup."""
     candidate = os.path.join(root, name)
@@ -52,7 +95,7 @@ def load_mask_resized_np(
     if not os.path.isfile(path):
         raise FileNotFoundError(path)
 
-    im = Image.open(path)
+    im = _open_image(path)
     # Convert to single channel; handles RGB/RGBA masks gracefully.
     im = im.convert("L")
     if im.size != size:
@@ -85,7 +128,7 @@ def apply_mask_to_rgb(im: Image.Image, mask01: np.ndarray) -> Image.Image:
 @lru_cache(maxsize=4096)
 def load_rgb_resized(path: str, size: Tuple[int, int]) -> Image.Image:
     """Load an RGB image and resize it to the requested size."""
-    im = Image.open(path).convert("RGB")
+    im = _open_image(path).convert("RGB")
     if im.size != size:
         im = im.resize(size, Image.BILINEAR)
     return im
