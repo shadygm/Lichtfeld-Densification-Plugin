@@ -40,18 +40,23 @@ def _load_exr(path: str) -> Image.Image:
     def pick(suffix: str) -> Optional[np.ndarray]:
         if suffix in channels:
             return channels[suffix]
-        # Layered files name channels like "beauty.R"; take the first layer found.
         for name in sorted(channels):
             if name.rsplit(".", 1)[-1] == suffix:
                 return channels[name]
         return None
 
-    r, g, b = pick("R"), pick("G"), pick("B")
-    if r is None or g is None or b is None:
-        y = pick("Y")
-        if y is None:
-            raise ValueError(f"EXR has no RGB or Y channels: {sorted(channels)}")
-        r = g = b = y
+    if all(name in channels for name in ("R", "G", "B")):
+        r, g, b = (channels[name] for name in ("R", "G", "B"))
+    else:
+        prefixes = sorted({name.rsplit(".", 1)[0] for name in channels if name.endswith(".R")})
+        prefix = next((p for p in prefixes if all(f"{p}.{suffix}" in channels for suffix in ("R", "G", "B"))), None)
+        if prefix is not None:
+            r, g, b = (channels[f"{prefix}.{suffix}"] for suffix in ("R", "G", "B"))
+        else:
+            y = pick("Y")
+            if y is None:
+                raise ValueError(f"EXR has no RGB or Y channels: {sorted(channels)}")
+            r = g = b = y
     rgb = np.stack([r, g, b], axis=-1).astype(np.float32)
     rgb = np.nan_to_num(rgb, nan=0.0, posinf=1.0, neginf=0.0)
     return Image.fromarray(to_uint8_rgb(rgb), mode="RGB")
