@@ -1152,7 +1152,7 @@ class DensificationPanel(lf.ui.Panel):
         return self._import_ply(path)
 
     def _on_complete(self, result: DensifyResult):
-        base_count = self._row_count(self._base_point_cloud_points)
+        base_count = len(self._base_point_cloud_points) if self._base_point_cloud_points is not None else 0
         run_roi_only_selected = self._run_roi_only_selected()
         if run_roi_only_selected and base_count > 0 and result.success:
             result.num_points = base_count + result.num_points
