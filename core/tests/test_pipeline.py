@@ -6,10 +6,11 @@ import torch
 
 from core.camera_models import CameraRecord
 from core.config import DensePipelineConfig
-from core.pipeline import (
+from core.stages.types import (
     _MatchedReference, _PackedReferenceBatch, _TriangulationContext,
-    _build_camera_lookup, _triangulate_ref,
 )
+from core.stages.preparation import _build_camera_lookup
+from core.stages.triangulation import _triangulate_ref
 
 
 class TriangulationTests(unittest.TestCase):

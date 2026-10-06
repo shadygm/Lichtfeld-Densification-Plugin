@@ -8,7 +8,8 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 from core.config import DensePipelineConfig
-from core.pipeline import PipelineCancelled, _TriangulatedReference, run_dense_pipeline
+from core.pipeline import PipelineCancelled, run_dense_pipeline
+from core.stages.types import _TriangulatedReference
 
 
 class PipelineOverlapTests(unittest.TestCase):
