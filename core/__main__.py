@@ -14,6 +14,8 @@ from .config import DensePipelineConfig
 from .geometry import K_from_camera, P_from_KRt, cam_center_world, pose_world2cam
 from .image_utils import find_image, image_dir, to_uint8_rgb
 from .pipeline import run_dense_pipeline
+from .metrics import compute_reprojection_metrics
+from dataclasses import asdict
 from .selection import nearest_neighbors, select_cameras_kcenters
 from .writers import write_ply
 
@@ -73,11 +75,21 @@ def main() -> int:
         raise RuntimeError("No points remain after track-length filtering")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     write_ply(str(output_path), result.xyz[keep], to_uint8_rgb(result.rgb[keep]))
-    print(json.dumps(dict(
+    metrics_started = time.perf_counter()
+    reprojection = compute_reprojection_metrics(
+        result.xyz[keep], [result.tracks[index] for index in keep], records, config.reproj_thresh,
+    )
+    metrics_seconds = time.perf_counter() - metrics_started
+    report_path = output_path.with_suffix(".metrics.json")
+    report = dict(
         cameras=len(records), references=len(refs), points=len(keep),
         pipeline_seconds=result.elapsed_seconds, total_seconds=time.perf_counter() - started,
-        output_path=str(output_path),
-    )), flush=True)
+        output_path=str(output_path), metrics_path=str(report_path),
+        scene_root=str(scene_root.resolve()), config=asdict(config),
+        metrics_seconds=metrics_seconds, reprojection=reprojection,
+    )
+    report_path.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
+    print(json.dumps(report, allow_nan=False), flush=True)
     return 0
 
 
