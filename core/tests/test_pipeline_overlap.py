@@ -39,7 +39,10 @@ class PipelineOverlapTests(unittest.TestCase):
             with self.subTest(ref=ref):
                 self.run_pipeline(cancel=False, files=True, tri_fail=ref)
 
-    def run_pipeline(self, cancel, mps=False, files=False, fail=False, retain=True, tri_fail=None):
+    def test_skipped_packages_do_not_count_as_matching_work(self):
+        self.run_pipeline(cancel=False, skip=True)
+
+    def run_pipeline(self, cancel, mps=False, files=False, fail=False, retain=True, tri_fail=None, skip=False):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         output = Path(directory.name) / 'final.ply'
@@ -59,6 +62,8 @@ class PipelineOverlapTests(unittest.TestCase):
         cancelled = Event()
         next_match = Event()
         packages = [SimpleNamespace(ref_id=uid) for uid in (1, 2)]
+        if skip:
+            packages[0] = None
         def packs():
             yield from packages
             if fail:
@@ -68,6 +73,7 @@ class PipelineOverlapTests(unittest.TestCase):
         loader.__iter__.return_value = packs()
         matcher = SimpleNamespace(w_resized=10, h_resized=10, sample_thresh=.9, close=MagicMock())
         seen = []
+        progress = MagicMock()
 
         def match(packed, pair_counter, **kwargs):
             if packed.ref_id == 2:
@@ -107,6 +113,8 @@ class PipelineOverlapTests(unittest.TestCase):
             stack.enter_context(patch('core.pipeline.runner._collect_reference_matches', side_effect=match))
             stack.enter_context(patch('core.pipeline.runner._triangulate_ref', side_effect=triangulate))
             stack.enter_context(patch('core.pipeline.runner.TemporaryCloudPreviews', side_effect=create_previews))
+            if skip:
+                stack.enter_context(patch('core.pipeline.control.time.perf_counter', side_effect=[100., 110.]))
             if not files:
                 stack.enter_context(patch('core.pipeline.runner._emit_intermediate_preview', side_effect=preview))
             def run():
@@ -116,6 +124,7 @@ class PipelineOverlapTests(unittest.TestCase):
                     cancel_requested=cancelled.is_set,
                     on_sequential_viz=consume_preview if files else None,
                     retain_observations=retain,
+                    progress_callback=progress,
                 )
             if cancel:
                 with self.assertRaises(PipelineCancelled):
@@ -129,11 +138,15 @@ class PipelineOverlapTests(unittest.TestCase):
                 self.assertIsInstance(caught.exception.__cause__, ValueError)
             else:
                 result = run()
-                np.testing.assert_array_equal(result.xyz[:, 0], [1, 2])
+                np.testing.assert_array_equal(result.xyz[:, 0], [2] if skip else [1, 2])
                 if not files:
-                    self.assertEqual(seen, [1, 2])
-                self.assertEqual(result.pairs_processed, 2)
+                    self.assertEqual(seen, [1] if skip else [1, 2])
+                self.assertEqual(result.pairs_processed, 1 if skip else 2)
                 self.assertEqual(result.tracks.has_observations, retain)
+                if skip:
+                    self.assertIn('Matching 1/2 (1 skipped)', [call.args[1] for call in progress.call_args_list])
+                    self.assertIn('Matching 2/2 (1 skipped) | 0.1 it/s',
+                                  [call.args[1] for call in progress.call_args_list])
             self.assertEqual(mocks['core.matching.roma.RomaMatcher'].call_args.kwargs['device'],
                              'mps' if mps else 'cpu')
         loader.close.assert_called_once_with(wait=True)

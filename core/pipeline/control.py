@@ -44,14 +44,20 @@ def _report_matching_progress(
     refs_consumed: int,
     total_refs: int,
     start_time: float,
+    *,
+    matched_refs: int | None = None,
 ) -> None:
     if progress_callback is None:
         return
     pct = 10.0 + (float(refs_consumed) / max(1, total_refs)) * 80.0
     message = f"Matching {refs_consumed}/{total_refs}"
-    if refs_consumed:
+    completed = refs_consumed if matched_refs is None else matched_refs
+    skipped = refs_consumed - completed
+    if skipped:
+        message += f" ({skipped} skipped)"
+    if completed:
         elapsed = max(0.001, time.perf_counter() - start_time)
-        message += f" | {refs_consumed / elapsed:.1f} it/s"
+        message += f" | {completed / elapsed:.1f} it/s"
     progress_callback(pct, message)
 
 

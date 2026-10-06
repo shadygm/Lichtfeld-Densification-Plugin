@@ -164,6 +164,7 @@ def run_dense_pipeline(
 
         matching_started = time.perf_counter()
         refs_consumed = 0
+        refs_matched = 0
         _report_matching_progress(progress_callback, 0, total_refs, matching_started)
         while True:
             _raise_if_cancelled(cancel_requested)
@@ -175,6 +176,8 @@ def run_dense_pipeline(
             refs_consumed += 1
 
             if packed is None:
+                _report_matching_progress(progress_callback, refs_consumed, total_refs,
+                                          matching_started, matched_refs=refs_matched)
                 continue
             _raise_if_cancelled(cancel_requested)
 
@@ -185,7 +188,9 @@ def run_dense_pipeline(
                 pair_counter=points.pair_counter,
                 cancel_requested=cancel_requested,
             )
-            _report_matching_progress(progress_callback, refs_consumed, total_refs, matching_started)
+            refs_matched += 1
+            _report_matching_progress(progress_callback, refs_consumed, total_refs,
+                                      matching_started, matched_refs=refs_matched)
             if matched_ref is None:
                 continue
 
