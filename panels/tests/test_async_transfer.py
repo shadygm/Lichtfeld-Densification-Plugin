@@ -31,6 +31,8 @@ class AsyncTransferTests(AsyncPanelTestCase):
         self.panel.on_update(None)
         self.assertIs(self.panel.last_result, result)
         self.assertFalse(self.panel._is_running())
+        self.assertIsNone(self.panel._base_point_cloud_points)
+        self.assertIsNone(self.panel._base_point_cloud_colors)
         self.host.start_training.assert_called_once()
         self.panel.on_update(None)
         self.host.start_training.assert_called_once()
@@ -111,6 +113,8 @@ class AsyncTransferTests(AsyncPanelTestCase):
             self.panel.on_update(None)
             self.assertFalse(self.panel._preview_override_active)
             self.assertIsNone(self.panel._active_run_roi_only_selected)
+            self.assertIsNone(self.panel._base_point_cloud_points)
+            self.assertIsNone(self.panel._base_point_cloud_colors)
             np.testing.assert_array_equal(self.scene.node.point_cloud().means.array, np.zeros((2, 3)))
 
     def test_cancel_pending_final_restores_instead_of_training(self):
@@ -190,6 +194,8 @@ class AsyncTransferTests(AsyncPanelTestCase):
         self.panel.on_unmount(Mock())
         self.assertEqual(ticket.state, 'cancelled')
         self.panel.job.cancel.assert_called_once()
+        self.assertIsNone(self.panel._base_point_cloud_points)
+        self.assertIsNone(self.panel._base_point_cloud_colors)
         result = self.result()
         self.panel._on_complete(result)
         self.assertIsNone(result.cloud)

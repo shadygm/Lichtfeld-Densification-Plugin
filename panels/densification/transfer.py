@@ -21,6 +21,13 @@ class _CloudUpdate:
 
 
 class DensificationTransfer:
+    def _release_cloud_snapshot(self):
+        # Drop our references; the async API retains any inputs still in flight.
+        self._base_point_cloud_points = None
+        self._base_point_cloud_colors = None
+        self._active_run_roi_only_selected = None
+        self._preview_override_active = False
+
     @staticmethod
     def _set_point_cloud_data(point_cloud, points, colors):
         # The API retains the input owners; never mutate submitted arrays/tensors.

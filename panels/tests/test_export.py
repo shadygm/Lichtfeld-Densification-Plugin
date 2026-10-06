@@ -120,6 +120,7 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(job.result.num_points, 2)
         self.assertIsNone(job.result.output_path)
         self.assertIsNotNone(job.result.cloud)
+        self.assertIsNone(job.camera_nodes)
         complete.assert_called_once_with(job.result)
         self.assertIn('Finalizing', [call.args[0] for call in progress.call_args_list])
         self.assertNotIn('Writing', [call.args[0] for call in progress.call_args_list])
@@ -134,6 +135,7 @@ class ExportTests(unittest.TestCase):
             job._run()
         self.assertEqual(job.stage, self.jobs.DensifyStage.CANCELLED)
         self.assertFalse(job.result.success)
+        self.assertIsNone(job.camera_nodes)
         complete.assert_not_called()
         write.assert_not_called()
 

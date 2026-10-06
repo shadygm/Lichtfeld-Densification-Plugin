@@ -254,5 +254,6 @@ class DensifyJob:
                 self.on_error(e)
 
         finally:
+            self.camera_nodes = None
             if self.debug_state:
                 self.debug_state.release_waiters()

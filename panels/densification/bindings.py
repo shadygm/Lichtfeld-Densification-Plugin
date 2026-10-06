@@ -114,6 +114,8 @@ class DensificationBindings:
 
         # Track running state changes
         running = self._is_running()
+        if not running and self.last_result is not None:
+            self._release_cloud_snapshot()
         if running != self._last_running:
             self._last_running = running
             self._dirty("show_idle", "show_running")
@@ -189,10 +191,7 @@ class DensificationBindings:
         # while sequential previews/final import are still being applied.
         if not self._is_running() and not self._pending_import:
             self._target_point_cloud_uuid = None
-            self._base_point_cloud_points = None
-            self._base_point_cloud_colors = None
-            self._active_run_roi_only_selected = None
-            self._preview_override_active = False
+            self._release_cloud_snapshot()
         if self._handle:
             self._dirty(
                 "has_scene",
@@ -212,6 +211,7 @@ class DensificationBindings:
             self.job.cancel()
         self._cancel_cloud_update()
         self._discard_pending_import()
+        self._release_cloud_snapshot()
         doc.remove_data_model("densification")
         self._scrub_fields.unmount()
         self._handle = None

@@ -23,19 +23,6 @@ _DEBUG_PREVIEW_INTERVAL = 3
 _PREVIEW_MAX_MATCHES = 10000
 
 
-def _prepare_intermediate_ply_base(
-    output_path: str,
-    viz_interval: int,
-    on_sequential_viz: Optional[Callable[[str], None]],
-) -> Optional[str]:
-    if not on_sequential_viz or viz_interval <= 0:
-        return None
-    output_dir = os.path.dirname(output_path)
-    base_no_ext = os.path.splitext(os.path.basename(output_path))[0]
-    os.makedirs(output_dir, exist_ok=True)
-    return os.path.join(output_dir, f"{base_no_ext}_intermediate")
-
-
 def _emit_debug_previews(
     matched_ref: _MatchedReference,
     tri_ref: _TriangulatedReference,

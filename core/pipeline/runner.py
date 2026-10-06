@@ -14,6 +14,7 @@ from ..cameras.models import CameraRecord
 from .config import DensePipelineConfig
 from ..cameras.geometry import camera_model_name
 from ..previews.matches import MatchDebugState
+from ..previews.files import TemporaryCloudPreviews
 from .prefetch import ThreadedReferenceLoader
 from .types import (
     PipelineCancelled,
@@ -34,7 +35,6 @@ from .matching import _collect_reference_matches
 from .preview import (
     _emit_debug_previews,
     _emit_intermediate_preview,
-    _prepare_intermediate_ply_base,
 )
 from .triangulation import _triangulate_ref
 
@@ -78,9 +78,10 @@ def run_dense_pipeline(
         debug_state.set_total_pairs(total_pairs_est)
 
     viz_interval = config.viz_interval
-    intermediate_ply_base = _prepare_intermediate_ply_base(
-        config.output_path, viz_interval, on_sequential_viz if on_cloud_preview is None else None,
+    preview_files = TemporaryCloudPreviews(
+        config.output_path, bool(on_sequential_viz and viz_interval > 0 and on_cloud_preview is None),
     )
+    intermediate_ply_base = preview_files.base
 
     points = _PipelineAccumulator()
     t0 = time.time()
@@ -198,6 +199,7 @@ def run_dense_pipeline(
         finish_pending()
 
     finally:
+        preview_files.cleanup()
         if triangulator is not None:
             triangulator.shutdown(wait=True, cancel_futures=True)
         _cleanup_pipeline_runtime(pack_loader, matcher, debug_state)

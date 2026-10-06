@@ -1,5 +1,7 @@
 """The pipeline overlaps work but drains results and previews in order."""
 from contextlib import ExitStack
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 from threading import Event, current_thread, main_thread
 import unittest
@@ -10,6 +12,7 @@ import numpy as np
 from core.pipeline.config import DensePipelineConfig
 from core.pipeline import PipelineCancelled, run_dense_pipeline
 from core.pipeline.types import _TriangulatedReference
+from core.previews.files import TemporaryCloudPreviews
 
 
 class PipelineOverlapTests(unittest.TestCase):
@@ -22,12 +25,38 @@ class PipelineOverlapTests(unittest.TestCase):
     def test_pipeline_passes_mps_to_matcher(self):
         self.run_pipeline(cancel=False, mps=True)
 
-    def run_pipeline(self, cancel, mps=False):
+    def test_file_previews_are_removed_on_success_cancel_and_failure(self):
+        for cancel, fail in ((False, False), (True, False), (False, True)):
+            with self.subTest(cancel=cancel, fail=fail):
+                self.run_pipeline(cancel=cancel, files=True, fail=fail)
+
+    def run_pipeline(self, cancel, mps=False, files=False, fail=False):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        output = Path(directory.name) / 'final.ply'
+        output.write_bytes(b'keep explicit export')
+        temporary_roots, preview_paths = [], []
+
+        def create_previews(*args):
+            owned = TemporaryCloudPreviews(*args)
+            if owned.base:
+                temporary_roots.append(Path(owned.base).parent)
+            return owned
+
+        def consume_preview(path):
+            preview_paths.append(Path(path))
+            self.assertTrue(Path(path).read_bytes().startswith(b'ply\n'))
+
         cancelled = Event()
         next_match = Event()
         packages = [SimpleNamespace(ref_id=uid) for uid in (1, 2)]
+        def packs():
+            yield from packages
+            if fail:
+                raise RuntimeError('loader failed')
+
         loader = MagicMock()
-        loader.__iter__.return_value = iter(packages)
+        loader.__iter__.return_value = packs()
         matcher = SimpleNamespace(w_resized=10, h_resized=10, sample_thresh=.9, close=MagicMock())
         seen = []
 
@@ -64,21 +93,36 @@ class PipelineOverlapTests(unittest.TestCase):
                 mocks[target] = stack.enter_context(patch(target, return_value=replacement))
             stack.enter_context(patch('core.pipeline.runner._collect_reference_matches', side_effect=match))
             stack.enter_context(patch('core.pipeline.runner._triangulate_ref', side_effect=triangulate))
-            stack.enter_context(patch('core.pipeline.runner._emit_intermediate_preview', side_effect=preview))
+            stack.enter_context(patch('core.pipeline.runner.TemporaryCloudPreviews', side_effect=create_previews))
+            if not files:
+                stack.enter_context(patch('core.pipeline.runner._emit_intermediate_preview', side_effect=preview))
             def run():
                 return run_dense_pipeline(
-                    [], [0, 1], np.array([[1], [0]]), DensePipelineConfig(output_path=''),
+                    [], [0, 1], np.array([[1], [0]]),
+                    DensePipelineConfig(output_path=str(output), viz_interval=1),
                     cancel_requested=cancelled.is_set,
+                    on_sequential_viz=consume_preview if files else None,
                 )
             if cancel:
                 with self.assertRaises(PipelineCancelled):
                     run()
+            elif fail:
+                with self.assertRaisesRegex(RuntimeError, 'loader failed'):
+                    run()
             else:
                 result = run()
                 np.testing.assert_array_equal(result.xyz[:, 0], [1, 2])
-                self.assertEqual(seen, [1, 2])
+                if not files:
+                    self.assertEqual(seen, [1, 2])
                 self.assertEqual(result.pairs_processed, 2)
             self.assertEqual(mocks['core.matching.roma.RomaMatcher'].call_args.kwargs['device'],
                              'mps' if mps else 'cpu')
         loader.close.assert_called_once_with(wait=True)
         matcher.close.assert_called_once()
+        if files:
+            self.assertEqual(len(temporary_roots), 1)
+            self.assertFalse(temporary_roots[0].exists())
+            self.assertTrue(all(not path.exists() for path in preview_paths))
+            if not cancel:
+                self.assertGreater(len(preview_paths), 0)
+        self.assertEqual(output.read_bytes(), b'keep explicit export')
