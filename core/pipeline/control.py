@@ -5,8 +5,8 @@ import logging
 import time
 from typing import Callable, List, Optional
 import numpy as np
-from ..debug_viz import MatchDebugState
-from ..threaded_dataloader import ThreadedReferenceLoader
+from ..previews.matches import MatchDebugState
+from .prefetch import ThreadedReferenceLoader
 from .types import PipelineCancelled, _PackedReferenceBatch
 
 logger = logging.getLogger(__name__)
@@ -67,7 +67,7 @@ def _report_model_setup_status(
         progress_callback(10.0, msg)
     logger.info(msg)
     if not model_cached:
-        from ..matcher import romav2_cached_weights_paths
+        from ..matching.roma import romav2_cached_weights_paths
 
         cache_hints = ", ".join(romav2_cached_weights_paths())
         logger.info(f"RoMaV2 weights not found in cache; expected cache paths: {cache_hints}")

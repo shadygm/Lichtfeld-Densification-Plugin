@@ -14,7 +14,7 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(__file__).resolve().parents[2]
 _ROMA_SRC = _ROOT / "RoMaV2" / "src"
 if str(_ROMA_SRC) not in sys.path:
     sys.path.insert(0, str(_ROMA_SRC))

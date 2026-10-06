@@ -4,7 +4,7 @@ import unittest
 import numpy as np
 import torch
 
-from core.sampling import select_samples_with_coverage
+from core.matching.sampling import select_samples_with_coverage
 
 
 class SamplingTests(unittest.TestCase):

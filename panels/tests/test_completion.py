@@ -10,9 +10,9 @@ import numpy as np
 
 class CompletionTests(unittest.TestCase):
     def test_completion_with_and_without_base_cloud(self):
-        source = Path(__file__).parents[1] / 'densification.py'
+        source = Path(__file__).parents[1] / 'densification' / 'workflow.py'
         panel_class = next(node for node in ast.parse(source.read_text()).body
-                           if isinstance(node, ast.ClassDef) and node.name == 'DensificationPanel')
+                           if isinstance(node, ast.ClassDef) and node.name == 'DensificationWorkflow')
         callback = next(node for node in panel_class.body if isinstance(node, ast.FunctionDef)
                         and node.name == '_on_complete')
         namespace = {'lf': SimpleNamespace(log=Mock()), 'DensifyResult': SimpleNamespace}

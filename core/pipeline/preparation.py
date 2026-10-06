@@ -4,10 +4,10 @@ from __future__ import annotations
 import logging
 from typing import Callable, List, Optional
 import numpy as np
-from ..camera_models import CameraRecord
-from ..config import DensePipelineConfig
-from ..geometry import uses_distortion_aware_projection
-from ..threaded_dataloader import ThreadedReferenceLoader
+from ..cameras.models import CameraRecord
+from .config import DensePipelineConfig
+from ..cameras.geometry import uses_distortion_aware_projection
+from .prefetch import ThreadedReferenceLoader
 from .types import _CameraLookup, _PackContext, _PackedReferenceBatch
 from .control import _is_cancelled
 

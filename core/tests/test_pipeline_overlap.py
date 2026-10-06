@@ -7,9 +7,9 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from core.config import DensePipelineConfig
+from core.pipeline.config import DensePipelineConfig
 from core.pipeline import PipelineCancelled, run_dense_pipeline
-from core.stages.types import _TriangulatedReference
+from core.pipeline.types import _TriangulatedReference
 
 
 class PipelineOverlapTests(unittest.TestCase):
@@ -50,16 +50,16 @@ class PipelineOverlapTests(unittest.TestCase):
 
         with ExitStack() as stack:
             for target, replacement in {
-                'core.pipeline._build_camera_lookup': SimpleNamespace(img_ids=[1, 2], by_id={}, distorted_ids=set()),
-                'core.pipeline._build_pack_loader': loader,
-                'core.matcher.RomaMatcher': matcher,
-                'core.matcher.has_cached_romav2_weights': True,
-                'core.pipeline.torch.cuda.is_available': False,
+                'core.pipeline.runner._build_camera_lookup': SimpleNamespace(img_ids=[1, 2], by_id={}, distorted_ids=set()),
+                'core.pipeline.runner._build_pack_loader': loader,
+                'core.matching.roma.RomaMatcher': matcher,
+                'core.matching.roma.has_cached_romav2_weights': True,
+                'core.pipeline.runner.torch.cuda.is_available': False,
             }.items():
                 stack.enter_context(patch(target, return_value=replacement))
-            stack.enter_context(patch('core.pipeline._collect_reference_matches', side_effect=match))
-            stack.enter_context(patch('core.pipeline._triangulate_ref', side_effect=triangulate))
-            stack.enter_context(patch('core.pipeline._emit_intermediate_preview', side_effect=preview))
+            stack.enter_context(patch('core.pipeline.runner._collect_reference_matches', side_effect=match))
+            stack.enter_context(patch('core.pipeline.runner._triangulate_ref', side_effect=triangulate))
+            stack.enter_context(patch('core.pipeline.runner._emit_intermediate_preview', side_effect=preview))
             def run():
                 return run_dense_pipeline(
                     [], [0, 1], np.array([[1], [0]]), DensePipelineConfig(output_path=''),

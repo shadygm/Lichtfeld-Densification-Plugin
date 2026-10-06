@@ -5,7 +5,7 @@ import threading
 import time
 import unittest
 
-spec = importlib.util.spec_from_file_location("threaded_dataloader", Path(__file__).parents[1] / "threaded_dataloader.py")
+spec = importlib.util.spec_from_file_location("prefetch", Path(__file__).parents[1] / "pipeline" / "prefetch.py")
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 ThreadedReferenceLoader = module.ThreadedReferenceLoader

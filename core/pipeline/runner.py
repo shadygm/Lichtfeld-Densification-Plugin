@@ -8,36 +8,33 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, List, Optional
 import numpy as np
 import torch
-from .camera_models import CameraRecord
+from ..cameras.models import CameraRecord
 from .config import DensePipelineConfig
-from .geometry import camera_model_name
-from .debug_viz import MatchDebugState
-from .threaded_dataloader import ThreadedReferenceLoader
-from .stages.types import (
+from ..cameras.geometry import camera_model_name
+from ..previews.matches import MatchDebugState
+from .prefetch import ThreadedReferenceLoader
+from .types import (
     PipelineCancelled,
     PipelineResult,
     _PackContext,
     _PipelineAccumulator,
     _TriangulationContext,
 )
-from .stages.preparation import (
-    _build_camera_lookup,
-    _build_pack_loader,
-)
-from .stages.control import (
+from .preparation import _build_camera_lookup, _build_pack_loader
+from .control import (
     _cleanup_pipeline_runtime,
     _estimate_total_pairs,
     _raise_if_cancelled,
     _report_matching_progress,
     _report_model_setup_status,
 )
-from .stages.matching import _collect_reference_matches
-from .stages.preview import (
+from .matching import _collect_reference_matches
+from .preview import (
     _emit_debug_previews,
     _emit_intermediate_preview,
     _prepare_intermediate_ply_base,
 )
-from .stages.triangulation import _triangulate_ref
+from .triangulation import _triangulate_ref
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +85,7 @@ def run_dense_pipeline(
     pack_ctx = None
 
     try:
-        from .matcher import RomaMatcher, has_cached_romav2_weights
+        from ..matching.roma import RomaMatcher, has_cached_romav2_weights
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model_cached = has_cached_romav2_weights()

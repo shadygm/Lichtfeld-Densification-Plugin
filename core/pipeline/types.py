@@ -7,9 +7,9 @@ from functools import lru_cache
 from typing import Callable, Dict, List, Optional, Tuple
 import numpy as np
 import torch
-from ..camera_models import CameraRecord
-from ..config import DensePipelineConfig
-from ..image_utils import apply_mask_to_rgb, load_mask_resized_np, load_rgb_resized
+from ..cameras.models import CameraRecord
+from .config import DensePipelineConfig
+from ..images.io import apply_mask_to_rgb, load_mask_resized_np, load_rgb_resized
 
 logger = logging.getLogger(__name__)
 

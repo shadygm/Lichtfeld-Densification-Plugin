@@ -5,7 +5,7 @@ from collections import OrderedDict
 
 import torch
 
-from core.matcher import RomaMatcher, _CachedFeatures
+from core.matching.roma import RomaMatcher, _CachedFeatures
 
 
 class FeatureCacheTests(unittest.TestCase):

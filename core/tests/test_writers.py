@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from core.writers import write_ply
+from core.reconstruction.writers import write_ply
 
 
 class PlyTests(unittest.TestCase):

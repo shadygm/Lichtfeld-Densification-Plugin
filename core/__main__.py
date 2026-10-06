@@ -9,15 +9,15 @@ import time
 
 import numpy as np
 
-from .camera_models import CameraRecord
-from .config import DensePipelineConfig
-from .geometry import K_from_camera, P_from_KRt, cam_center_world, pose_world2cam
-from .image_utils import find_image, image_dir, to_uint8_rgb
+from .cameras.models import CameraRecord
+from .pipeline.config import DensePipelineConfig
+from .cameras.geometry import K_from_camera, P_from_KRt, cam_center_world, pose_world2cam
+from .images.io import find_image, image_dir, to_uint8_rgb
 from .pipeline import run_dense_pipeline
-from .metrics import compute_reprojection_metrics
+from .reconstruction.metrics import compute_reprojection_metrics
 from dataclasses import asdict
-from .selection import nearest_neighbors, select_cameras_kcenters
-from .writers import write_ply
+from .cameras.selection import nearest_neighbors, select_cameras_kcenters
+from .reconstruction.writers import write_ply
 
 
 def main() -> int:

@@ -20,12 +20,21 @@ _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from .core.camera_models import CameraRecord
-from .core.config import DensePipelineConfig
-from .core.geometry import K_from_camera, P_from_KRt, cam_center_world, pose_world2cam
-from .core.image_utils import find_image, image_dir, to_uint8_rgb
-from .core.selection import nearest_neighbors, select_cameras_by_visibility, select_cameras_kcenters
-from .core.writers import write_ply, write_ply_vertices, write_points3D_bin, write_sparse_model_bin
+from .core.cameras.models import CameraRecord
+from .core.pipeline.config import DensePipelineConfig
+from .core.cameras.geometry import K_from_camera, P_from_KRt, cam_center_world, pose_world2cam
+from .core.images.io import find_image, image_dir, to_uint8_rgb
+from .core.cameras.selection import (
+    nearest_neighbors,
+    select_cameras_by_visibility,
+    select_cameras_kcenters,
+)
+from .core.reconstruction.writers import (
+    write_ply,
+    write_ply_vertices,
+    write_points3D_bin,
+    write_sparse_model_bin,
+)
 
 if TYPE_CHECKING:
     import pycolmap

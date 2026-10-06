@@ -4,8 +4,8 @@ import unittest
 import numpy as np
 import pycolmap
 
-from core.camera_models import CameraRecord
-from core.metrics import compute_reprojection_metrics
+from core.cameras.models import CameraRecord
+from core.reconstruction.metrics import compute_reprojection_metrics
 
 
 def camera(model=None):

@@ -7,8 +7,8 @@ import unittest
 import numpy as np
 from PIL import Image
 
-from core.stages.types import _CameraLookup, _PackContext
-from core.stages.preparation import _pack_reference_batch
+from core.pipeline.types import _CameraLookup, _PackContext
+from core.pipeline.preparation import _pack_reference_batch
 
 
 class PreparedImageTests(unittest.TestCase):

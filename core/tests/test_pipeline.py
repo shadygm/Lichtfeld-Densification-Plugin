@@ -4,13 +4,11 @@ import unittest
 import numpy as np
 import torch
 
-from core.camera_models import CameraRecord
-from core.config import DensePipelineConfig
-from core.stages.types import (
-    _MatchedReference, _PackedReferenceBatch, _TriangulationContext,
-)
-from core.stages.preparation import _build_camera_lookup
-from core.stages.triangulation import _triangulate_ref
+from core.cameras.models import CameraRecord
+from core.pipeline.config import DensePipelineConfig
+from core.pipeline.types import _MatchedReference, _PackedReferenceBatch, _TriangulationContext
+from core.pipeline.preparation import _build_camera_lookup
+from core.pipeline.triangulation import _triangulate_ref
 
 
 class TriangulationTests(unittest.TestCase):

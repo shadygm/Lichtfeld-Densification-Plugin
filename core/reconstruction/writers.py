@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .camera_models import CameraRecord
+from ..cameras.models import CameraRecord
 
 
 def ensure_dir(path: str) -> None:

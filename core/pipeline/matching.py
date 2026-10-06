@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from ..config import DensePipelineConfig
+from .config import DensePipelineConfig
 from .types import _MatchedReference, _PackedReferenceBatch
 from .control import _raise_if_cancelled
 

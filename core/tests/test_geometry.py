@@ -4,7 +4,7 @@ import unittest
 import numpy as np
 import pycolmap
 
-from core.geometry import K_from_camera, dlt_triangulate_batch
+from core.cameras.geometry import K_from_camera, dlt_triangulate_batch
 
 
 class GeometryTests(unittest.TestCase):

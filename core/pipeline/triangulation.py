@@ -5,7 +5,7 @@ import logging
 from typing import Optional
 import numpy as np
 import torch
-from ..geometry import (
+from ..cameras.geometry import (
     Rt_from_Rt,
     cheirality_mask,
     cheirality_mask_Rt,
@@ -17,7 +17,7 @@ from ..geometry import (
     sampson_error,
     unproject_pixels,
 )
-from ..sampling import select_samples_with_coverage
+from ..matching.sampling import select_samples_with_coverage
 from .types import _MatchedReference, _TriangulatedReference, _TriangulationContext
 
 logger = logging.getLogger(__name__)
