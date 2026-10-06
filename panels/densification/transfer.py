@@ -50,7 +50,7 @@ class DensificationTransfer:
 
     def _cancel_cloud_update(self):
         if self._cloud_update is not None:
-            if self._cloud_update.ticket.state in ("failed", "superseded", "cancelled"):
+            if self._cloud_update.ticket.state in ("superseded", "cancelled"):
                 self._preview_override_active = False
             self._cloud_update.ticket.cancel()
             self._cloud_update = None
@@ -94,14 +94,17 @@ class DensificationTransfer:
         if state != "published":
             error = error or update.ticket.error or f"Cloud update {state}"
             lf.log.warn(f"Point cloud {update.kind} update: {error}")
-            # Never overwrite a newer external edit after supersession or failure.
-            self._preview_override_active = False
+            # Supersession/cancellation can belong to an external edit. A failed
+            # upload leaves our earlier published previews in place instead.
+            # Do not retry an unsuccessful rollback indefinitely.
+            if state in ("superseded", "cancelled") or update.kind == "restore":
+                self._preview_override_active = False
             self._cancel_requested = True
             if self.job:
                 self.job.cancel()
-            self._discard_pending_import()
-            self.last_result = DensifyResult(success=False, error=error)
-            self._active_run_roi_only_selected = None
+            self._cloud_update = None
+            self._recover_cloud(error)
+            return True
         self._cloud_update = None
         if state == "published" and update.kind == "final" and update.start_training:
             self._start_training_after_import()

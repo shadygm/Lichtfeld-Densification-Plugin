@@ -76,6 +76,11 @@ class AsyncTransferTests(AsyncPanelTestCase):
                 self.panel.on_update(None)
                 self.assertFalse(self.panel.last_result.success)
                 self.assertIn('native failure' if state == 'failed' else state, self.panel.last_result.error)
+                if state == 'failed':
+                    self.assertEqual(self.panel._cloud_update.kind, 'restore')
+                    self.assertTrue(self.panel._is_running())
+                    self.panel._cloud_update.ticket.publish()
+                    self.panel.on_update(None)
                 self.assertFalse(self.panel._is_running())
                 self.assertIsNone(result.cloud)
                 self.host.start_training.assert_not_called()
@@ -265,6 +270,49 @@ class AsyncTransferTests(AsyncPanelTestCase):
         with patch.object(self.panel, '_has_training_data') as has_cameras:
             self.panel._start()
         has_cameras.assert_not_called()
+
+    def test_failed_upload_restores_published_preview_even_before_poll(self):
+        for observed, final in ((False, True), (True, True), (True, False)):
+            with self.subTest(observed=observed, final=final):
+                self.assertTrue(self.panel._capture_base_point_cloud())
+                self.panel.last_result = None
+                self.panel._cancel_requested = False
+                self.panel._apply_dense_point_cloud(self.scene.node, self.scene.node.point_cloud(),
+                                                    np.ones((3, 3), np.float32), np.zeros((3, 3), np.uint8))
+                self.panel._cloud_update.ticket.publish()
+                if observed:
+                    self.panel.on_update(None)
+                if final:
+                    _, ticket = self.submit_final(train=True)
+                else:
+                    self.panel._apply_dense_point_cloud(self.scene.node, self.scene.node.point_cloud(),
+                                                        np.ones((4, 3), np.float32), np.zeros((4, 3), np.uint8))
+                    ticket = self.panel._cloud_update.ticket
+                ticket.state, ticket.error = 'failed', 'native upload failed'
+                self.panel.on_update(None)
+                self.assertFalse(self.panel.last_result.success)
+                self.assertEqual(self.panel.last_result.error, 'native upload failed')
+                self.assertEqual(self.panel._cloud_update.kind, 'restore')
+                self.assertIsNotNone(self.panel._base_point_cloud_points)
+                self.assertTrue(self.panel._is_running())
+                self.panel._cloud_update.ticket.publish()
+                self.panel.on_update(None)
+                np.testing.assert_array_equal(self.scene.node.point_cloud().means.array, np.zeros((2, 3)))
+                self.assertIsNone(self.panel._base_point_cloud_points)
+                self.assertFalse(self.panel._is_running())
+                self.host.start_training.assert_not_called()
+
+    def test_failed_restore_reports_failure_without_retrying(self):
+        _, ticket = self.submit_final()
+        ticket.state, ticket.error = 'failed', 'upload failed'
+        self.panel.on_update(None)
+        restore = self.panel._cloud_update.ticket
+        restore.state, restore.error = 'failed', 'restore failed'
+        self.panel.on_update(None)
+        self.assertEqual(self.panel.last_result.error, 'restore failed')
+        self.assertIsNone(self.panel._cloud_update)
+        self.assertIsNone(self.panel._base_point_cloud_points)
+        self.assertFalse(self.panel._is_running())
 
     def test_empty_cloud_publishes(self):
         result = self.result(np.empty((0, 3), np.float32), np.empty((0, 3), np.uint8))
