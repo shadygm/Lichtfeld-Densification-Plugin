@@ -5,10 +5,12 @@ import logging
 import time
 import gc
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from typing import Callable, List, Optional
 import numpy as np
 import torch
 from ..matching.device import get_device
+from ..runtime.backend import matcher_backend_settings
 from ..reconstruction.cloud import DenseCloud
 from ..reconstruction.tracks import ObservationTracks
 from ..cameras.models import CameraRecord
@@ -92,6 +94,7 @@ def run_dense_pipeline(
     pack_loader: Optional[ThreadedReferenceLoader[Optional[_PackedReferenceBatch]]] = None
     triangulator = None
     pack_ctx = None
+    backend_settings = ExitStack()
 
     try:
         from ..matching.roma import RomaMatcher, has_cached_romav2_weights
@@ -99,11 +102,7 @@ def run_dense_pipeline(
         device = get_device()
         model_cached = has_cached_romav2_weights()
         _report_model_setup_status(progress_callback, model_cached)
-        if torch.cuda.is_available():
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
-            # Fast runs spend more time searching kernels than the search saves.
-            torch.backends.cudnn.benchmark = config.roma_setting != "fast"
+        backend_settings.enter_context(matcher_backend_settings(config.roma_setting))
         matcher = RomaMatcher(device=device, mode="outdoor", setting=config.roma_setting)
         if not model_cached and progress_callback is not None:
             progress_callback(10.0, "RoMa v2 model installation complete. Starting matching...")
@@ -207,6 +206,7 @@ def run_dense_pipeline(
         finish_pending()
 
     finally:
+        backend_settings.close()
         preview_files.cleanup()
         if triangulator is not None:
             triangulator.shutdown(wait=True, cancel_futures=True)
