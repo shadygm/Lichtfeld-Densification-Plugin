@@ -124,7 +124,7 @@ class DensifyJob:
             return self._result
 
     def is_running(self) -> bool:
-        return self.stage in (
+        return (self._thread is not None and self._thread.is_alive()) or self.stage in (
             DensifyStage.LOADING,
             DensifyStage.MATCHING,
             DensifyStage.TRIANGULATING,

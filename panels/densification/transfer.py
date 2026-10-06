@@ -56,20 +56,34 @@ class DensificationTransfer:
             self._cloud_update = None
 
     def _discard_pending_import(self):
-        output = self._pending_import
-        self._pending_import = None
-        self._pending_start_training = False
+        output, _ = self._take_pending_import()
         if isinstance(output, DensifyResult):
             output.cloud = None
 
+    def _take_pending_import(self):
+        with self._handoff_lock:
+            output, start_training = self._pending_import, self._pending_start_training
+            self._pending_import = None
+            self._pending_start_training = False
+        return output, start_training
+
     def _recover_cloud(self, error):
-        self._cancel_cloud_update()
-        self._discard_pending_import()
-        if self._preview_override_active:
-            self._restore_base_point_cloud()
-        if self._cloud_update is None:
-            self._active_run_roi_only_selected = None
-        self.last_result = DensifyResult(success=False, error=error)
+        with self._handoff_lock:
+            self._cancel_requested = True
+            # Keep snapshots alive if the host emits scene notifications while
+            # a rollback is being submitted, before its ticket is available.
+            self._pending_error = error
+        try:
+            self._cancel_cloud_update()
+            self._discard_pending_import()
+            if self._preview_override_active:
+                self._restore_base_point_cloud()
+            if self._cloud_update is None:
+                self._active_run_roi_only_selected = None
+            self.last_result = DensifyResult(success=False, error=error)
+        finally:
+            with self._handoff_lock:
+                self._pending_error = None
 
     def _poll_cloud_update(self):
         update = self._cloud_update
@@ -111,20 +125,18 @@ class DensificationTransfer:
         return True
 
     def _update_cloud_transfer(self):
-        if self._pending_error is not None:
-            self._recover_cloud(self._pending_error)
-            self._pending_error = None
+        with self._handoff_lock:
+            error = self._pending_error
+        if error is not None:
+            self._recover_cloud(error)
             return True
         if self.job and self.job.stage == DensifyStage.CANCELLED and self.last_result is None:
             self._cancel_requested = True
             self._recover_cloud("Cancelled")
             return True
         changed = self._poll_cloud_update()
-        if self._pending_import is not None:
-            output = self._pending_import
-            start_training = self._pending_start_training
-            self._pending_import = None
-            self._pending_start_training = False
+        output, start_training = self._take_pending_import()
+        if output is not None:
             final = isinstance(output, DensifyResult)
             imported = self._import_output(output, start_training=start_training)
             if final and not imported:

@@ -179,8 +179,9 @@ class DensificationBindings:
         if self._target_point_cloud_uuid is not None and self._is_running():
             scene = lf.get_scene()
             if scene is None or scene.get_node_by_uuid(self._target_point_cloud_uuid) is None:
-                self._cancel_requested = True
-                self._pending_error = "Densification target is no longer available"
+                with self._handoff_lock:
+                    self._cancel_requested = True
+                    self._pending_error = "Densification target is no longer available"
                 if self.job:
                     self.job.cancel()
         self._last_camera_count = -1
@@ -206,7 +207,8 @@ class DensificationBindings:
             )
 
     def on_unmount(self, doc):
-        self._cancel_requested = True
+        with self._handoff_lock:
+            self._cancel_requested = True
         if self.job:
             self.job.cancel()
         self._cancel_cloud_update()

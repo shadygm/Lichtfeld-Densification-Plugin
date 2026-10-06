@@ -5,6 +5,7 @@
 import os
 import shutil
 import time
+from threading import Lock
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -64,6 +65,7 @@ class DensificationPanel(DensificationBindings, DensificationSettings, Densifica
 
         self.job = None
         self.last_result = None
+        self._handoff_lock = Lock()
         self._pending_import = None
         self._pending_error = None
         self._cloud_update = None

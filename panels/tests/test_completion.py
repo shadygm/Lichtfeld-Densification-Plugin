@@ -1,5 +1,6 @@
 """Exercise the completion callback without importing or launching LichtFeld."""
 import ast
+from threading import Lock
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -20,6 +21,7 @@ class CompletionTests(unittest.TestCase):
         for roi, base in [(False, None), (True, None), (True, np.zeros((7, 3)))]:
             with self.subTest(roi=roi, base=base is not None):
                 panel = SimpleNamespace(
+                    _handoff_lock=Lock(),
                     _base_point_cloud_points=base, _run_roi_only_selected=lambda: roi,
                     _auto_import=True, _start_training_when_complete=True,
                     _cancel_requested=False,

@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 from types import ModuleType, SimpleNamespace
-from threading import current_thread, main_thread
+from threading import Event, current_thread, main_thread
 import unittest
 from unittest.mock import Mock, patch
 
@@ -142,6 +142,24 @@ class ExportTests(unittest.TestCase):
         self.assertIsNone(job.camera_nodes)
         complete.assert_not_called()
         write.assert_not_called()
+
+    def test_job_remains_running_while_completion_callback_is_pending(self):
+        entered, release = Event(), Event()
+        def complete(result):
+            entered.set()
+            if not release.wait(2):
+                raise RuntimeError('completion not released')
+        job = self.jobs.DensifyJob(self.config, camera_nodes=[object(), object()], on_complete=complete)
+        job.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            self.assertEqual(job.stage, self.jobs.DensifyStage.DONE)
+            self.assertTrue(job.is_running())
+        finally:
+            release.set()
+            job._thread.join(3)
+        self.assertFalse(job.is_running())
+        self.assertTrue(job.result.success)
 
     def test_postprocessing_reuses_observations_and_keeps_alignment(self):
         xyz, rgb, err, tracks = self.adapter._apply_track_filter(
