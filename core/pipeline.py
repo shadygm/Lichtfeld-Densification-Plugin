@@ -628,15 +628,7 @@ def _triangulate_ref(
     warp_list = matched_ref.warp_list_cpu
     cert_list = matched_ref.cert_list_cpu
 
-    H, W = cert_list[0].shape
-    device_cpu = torch.device("cpu")
-    cert_stack = torch.stack(cert_list, dim=0).to(device_cpu)
-    best_cert, best_k = torch.max(cert_stack, dim=0)
-    warp_stack = torch.stack(warp_list, dim=0).to(device_cpu)
-
-    ys = torch.arange(H, device=device_cpu).unsqueeze(1).expand(H, W)
-    xs = torch.arange(W, device=device_cpu).unsqueeze(0).expand(H, W)
-    agg = warp_stack[best_k, ys, xs].reshape(-1, 4).numpy()
+    best_cert = torch.stack(cert_list, dim=0).amax(dim=0)
 
     sel_idx = select_samples_with_coverage(
         best_cert,
@@ -649,9 +641,11 @@ def _triangulate_ref(
     if sel_idx.size == 0:
         return None
 
-    selected_warps = warp_stack.reshape(len(nn_ids), -1, 4)[:, sel_idx, :].numpy()
-    selected_certs = cert_stack.reshape(len(nn_ids), -1)[:, sel_idx].numpy()
-    sel = agg[sel_idx]
+    # All pairs share the matcher-generated reference grid. Gather just the
+    # sampled locations instead of stacking and selecting full dense warps.
+    selected_warps = np.stack([warp.reshape(-1, 4)[sel_idx].numpy() for warp in warp_list])
+    selected_certs = np.stack([cert.reshape(-1)[sel_idx].numpy() for cert in cert_list])
+    sel = selected_warps[0]
     xA = (sel[:, 0] + 1.0) * 0.5 * (w_match - 1)
     yA = (sel[:, 1] + 1.0) * 0.5 * (h_match - 1)
 
