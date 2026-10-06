@@ -113,8 +113,15 @@ class DensificationScene:
 
         dense_points_np = self._coerce_point_cloud_array(dense_points, "dense_points", copy=False)
         dense_colors_np = self._coerce_point_cloud_array(dense_colors, "dense_colors", copy=False)
+        base_colors = self._base_point_cloud_colors
+        if dense_colors_np.dtype != base_colors.dtype:
+            # Preserve normalized float colors when merging a uint8 dense cloud.
+            if dense_colors_np.dtype == np.uint8:
+                dense_colors_np = dense_colors_np.astype(np.float32) / 255.0
+            if base_colors.dtype == np.uint8:
+                base_colors = base_colors.astype(np.float32) / 255.0
         merged_points_np = np.concatenate((dense_points_np, self._base_point_cloud_points), axis=0)
-        merged_colors_np = np.concatenate((dense_colors_np, self._base_point_cloud_colors), axis=0)
+        merged_colors_np = np.concatenate((dense_colors_np, base_colors), axis=0)
         return merged_points_np, merged_colors_np
 
     def _capture_base_point_cloud(self) -> bool:
@@ -139,7 +146,7 @@ class DensificationScene:
             )
             return False
 
-        self._target_point_cloud_name = target.name
+        self._target_point_cloud_uuid = target.uuid
         self._base_point_cloud_points = self._coerce_point_cloud_array(
             point_cloud.means,
             "means",
@@ -155,13 +162,9 @@ class DensificationScene:
     def _resolve_target_point_cloud_node(self, scene):
         if scene is None:
             return None
-        if self._target_point_cloud_name:
-            try:
-                target = scene.get_node(self._target_point_cloud_name)
-            except Exception:
-                target = None
-            if target is not None and target.type == lf.scene.NodeType.POINTCLOUD:
-                return target
+        if self._target_point_cloud_uuid is not None:
+            target = scene.get_node_by_uuid(self._target_point_cloud_uuid)
+            return target if target is not None and target.type == lf.scene.NodeType.POINTCLOUD else None
         return self._find_target_point_cloud_node(scene)
 
     @staticmethod
@@ -182,9 +185,9 @@ class DensificationScene:
             point_cloud = target.point_cloud()
             if point_cloud is None:
                 return
-            self._set_point_cloud_data(
-                point_cloud, self._base_point_cloud_points, self._base_point_cloud_colors,
+            self._queue_cloud_update(
+                target, point_cloud, self._base_point_cloud_points, self._base_point_cloud_colors,
+                kind="restore",
             )
-            self._preview_override_active = False
         except Exception as exc:
             lf.log.warn(f"Failed to restore original point cloud: {exc}")

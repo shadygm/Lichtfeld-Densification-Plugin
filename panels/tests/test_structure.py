@@ -137,13 +137,20 @@ class PanelStructureTests(unittest.TestCase):
                 self.assertIs(panel._pending_import, result)
                 self.assertTrue(panel._pending_start_training)
                 scene = Mock()
-                target = SimpleNamespace(name='cloud', point_cloud=lambda: object())
+                target = SimpleNamespace(name='cloud', uuid='cloud-uuid', point_cloud=lambda: object())
+                scene.get_node_by_uuid.return_value = target
                 operations = Mock()
+                ticket = SimpleNamespace(state='queued', error='', cancel=Mock())
+                operations.set_data.return_value = ticket
                 with patch.object(host, 'get_scene', return_value=scene), patch.object(
                     panel, '_resolve_target_point_cloud_node', return_value=target,
                 ), patch.object(panel, '_set_point_cloud_data', operations.set_data), patch.object(
                     panel, '_start_training_after_import', operations.start_training,
                 ):
+                    panel.on_update(None)
+                    self.assertIsNone(panel.last_result)
+                    operations.start_training.assert_not_called()
+                    ticket.state = 'published'
                     panel.on_update(None)
                 self.assertEqual([call[0] for call in operations.mock_calls], ['set_data', 'start_training'])
                 imported_points, imported_colors = operations.set_data.call_args.args[1:]
@@ -172,14 +179,17 @@ class PanelStructureTests(unittest.TestCase):
                         failed._pending_import = 'stale-preview.ply'
                         failed._pending_start_training = True
 
+                        restore_ticket = SimpleNamespace(state='queued', error='', cancel=Mock())
+
                         def set_data(*args):
                             self.assertIs(current_thread(), main_thread())
                             np.testing.assert_array_equal(args[1], base_points)
                             # A synchronous scene notification must keep the snapshot alive.
                             failed.on_scene_changed(None)
                             self.assertIs(failed._base_point_cloud_points, base_points)
+                            return restore_ticket
 
-                        with patch.object(host, 'get_scene', return_value=None) as get_scene, patch.object(
+                        with patch.object(host, 'get_scene', return_value=scene) as get_scene, patch.object(
                             failed, '_resolve_target_point_cloud_node', return_value=target,
                         ), patch.object(failed, '_set_point_cloud_data', side_effect=set_data) as setter, patch.object(
                             failed, '_import_output', side_effect=AssertionError('Stale preview imported'),
@@ -200,8 +210,12 @@ class PanelStructureTests(unittest.TestCase):
                             self.assertEqual(failed.last_result.error, 'worker failed')
                             self.assertIsNone(failed._pending_import)
                             self.assertIsNone(failed._pending_error)
-                            self.assertIsNone(failed._active_run_roi_only_selected)
                             self.assertFalse(failed._pending_start_training)
+                            if preview_active:
+                                self.assertTrue(failed._is_running())
+                                restore_ticket.state = 'published'
+                                failed.on_update(None)
+                            self.assertIsNone(failed._active_run_roi_only_selected)
                             self.assertFalse(failed._preview_override_active)
                             failed.on_update(None)
                             self.assertEqual(setter.call_count, int(preview_active))

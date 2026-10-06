@@ -51,8 +51,10 @@ class TransferTests(unittest.TestCase):
         points = Tensor(np.ones((2, 3), dtype=np.float32))
         colors = Tensor(np.ones((2, 3), dtype=np.uint8))
         cloud = Mock()
-        self.Panel._set_point_cloud_data(cloud, points, colors)
-        cloud.set_data.assert_called_once_with(points, colors)
+        ticket = self.Panel._set_point_cloud_data(cloud, points, colors)
+        cloud.set_data_async.assert_called_once_with(points, colors, queue_policy='latest')
+        self.assertIs(ticket, cloud.set_data_async.return_value)
+        cloud.set_data.assert_not_called()
         points.clone.assert_not_called()
         colors.clone.assert_not_called()
 
@@ -61,11 +63,24 @@ class TransferTests(unittest.TestCase):
         colors = np.arange(9, dtype=np.uint8).reshape(3, 3)
         cloud = Mock()
         self.Panel._set_point_cloud_data(cloud, points, colors)
-        actual_points, actual_colors = cloud.set_data.call_args.args
-        np.testing.assert_array_equal(actual_points.array, points)
-        np.testing.assert_array_equal(actual_colors.array, colors)
-        self.assertEqual(actual_points.array.dtype, np.float32)
-        self.assertEqual(actual_colors.array.dtype, np.uint8)
+        actual_points, actual_colors = cloud.set_data_async.call_args.args
+        np.testing.assert_array_equal(actual_points, points)
+        np.testing.assert_array_equal(actual_colors, colors)
+        self.assertTrue(actual_points.flags.c_contiguous)
+        self.assertIs(actual_colors, colors)
+        self.assertEqual(actual_points.dtype, np.float32)
+        self.assertEqual(actual_colors.dtype, np.uint8)
+        cloud.set_data.assert_not_called()
+
+    def test_float64_arrays_are_prepared_without_tensor_staging(self):
+        points = np.ones((2, 3), dtype=np.float64)
+        colors = np.full((2, 3), .5, dtype=np.float64)
+        cloud = Mock()
+        self.Panel._set_point_cloud_data(cloud, points, colors)
+        actual_points, actual_colors = cloud.set_data_async.call_args.args
+        self.assertEqual(actual_points.dtype, np.float32)
+        self.assertEqual(actual_colors.dtype, np.float32)
+        np.testing.assert_array_equal(actual_colors, colors)
 
     def test_snapshot_is_independent_without_copying_native_export_twice(self):
         original = np.arange(9, dtype=np.float32).reshape(3, 3)

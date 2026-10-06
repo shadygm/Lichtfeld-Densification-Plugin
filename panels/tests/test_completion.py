@@ -22,10 +22,11 @@ class CompletionTests(unittest.TestCase):
                 panel = SimpleNamespace(
                     _base_point_cloud_points=base, _run_roi_only_selected=lambda: roi,
                     _auto_import=True, _start_training_when_complete=True,
+                    _cancel_requested=False,
                 )
                 result = SimpleNamespace(success=True, num_points=10, output_path=None, cloud=object())
                 namespace['_on_complete'](panel, result)
-                self.assertIs(panel.last_result, result)
+                self.assertIsNone(panel.last_result)
                 self.assertEqual(result.num_points, 17 if roi and base is not None else 10)
                 self.assertIs(panel._pending_import, result)
                 self.assertTrue(panel._pending_start_training)

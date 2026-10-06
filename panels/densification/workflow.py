@@ -16,12 +16,15 @@ class DensificationWorkflow:
             lf.log.warn(f"Failed to start training after densification: {exc}")
 
     def _is_running(self) -> bool:
-        return self._pending_error is not None or (self.job is not None and self.job.is_running())
+        return (self._pending_error is not None or self._pending_import is not None
+                or self._cloud_update is not None or (self.job is not None and self.job.is_running()))
 
     def _on_do_start(self, handle, event, args):
         self._start()
 
     def _on_do_cancel(self, handle, event, args):
+        self._cancel_requested = True
+        self._pending_error = "Cancelled"
         if self.job:
             self.job.cancel()
 
@@ -53,6 +56,7 @@ class DensificationWorkflow:
             return
 
         self.last_result = None
+        self._cancel_requested = False
         self._pending_start_training = False
 
         self._active_run_roi_only_selected = bool(self.config.roi_only_selected)
@@ -74,9 +78,10 @@ class DensificationWorkflow:
         self.job.start()
 
     def _on_sequential_viz(self, ply_path: str):
-        self._pending_import = ply_path
+        if not self._cancel_requested:
+            self._pending_import = ply_path
 
-    def _import_output(self, output: str | DensifyResult) -> bool:
+    def _import_output(self, output: str | DensifyResult, *, start_training=False) -> bool:
         if isinstance(output, str):
             return self._import_ply(output)
         cloud = output.cloud
@@ -92,28 +97,30 @@ class DensificationWorkflow:
             if point_cloud is None:
                 lf.log.error(f"Node '{target.name}' has no point cloud data")
                 return False
-            return self._apply_dense_point_cloud(target, point_cloud, cloud.points, cloud.colors)
+            return self._apply_dense_point_cloud(target, point_cloud, cloud.points, cloud.colors,
+                                                 result=output, start_training=start_training)
         except Exception as exc:
             lf.log.error(f"Failed to import dense point cloud: {exc}")
+            self.last_result = DensifyResult(success=False, error=str(exc))
             return False
         finally:
-            # The scene owns its copy; retain only small job/result metadata.
+            # The async API owns the immutable inputs until inputs_released.
             output.cloud = None
 
     def _on_complete(self, result: DensifyResult):
+        if self._cancel_requested:
+            result.cloud = None
+            return
         base_count = len(self._base_point_cloud_points) if self._base_point_cloud_points is not None else 0
         run_roi_only_selected = self._run_roi_only_selected()
         if run_roi_only_selected and base_count > 0 and result.success:
             result.num_points = base_count + result.num_points
-        if run_roi_only_selected:
-            lf.log.info(f"Densification complete: {result.num_points:,} points after ROI merge")
-        else:
-            lf.log.info(f"Densification complete: {result.num_points:,} points after overwrite")
-        self.last_result = result
         if self._auto_import and result.success and result.cloud is not None:
+            self.last_result = None  # Completion is visible only after publication.
             self._pending_import = result
             self._pending_start_training = bool(self._start_training_when_complete and result.success)
         else:
+            self.last_result = result
             result.cloud = None
             self._pending_start_training = False
 
@@ -122,14 +129,13 @@ class DensificationWorkflow:
         self._pending_error = str(error)
         lf.log.error(f"Densification failed: {error}")
 
-    def _apply_dense_point_cloud(self, target, point_cloud, points, colors) -> bool:
+    def _apply_dense_point_cloud(self, target, point_cloud, points, colors, *,
+                                 result=None, start_training=False) -> bool:
         if self._run_roi_only_selected():
             points, colors = self._build_roi_merge_arrays(points, colors)
-        self._set_point_cloud_data(point_cloud, points, colors)
-        lf.log.debug(f"Updated '{target.name}' with {int(points.shape[0]):,} points")
-        self._preview_override_active = True
-        if not self._is_running() and not self._pending_import:
-            self._active_run_roi_only_selected = None
+        self._queue_cloud_update(target, point_cloud, points, colors,
+                                 kind="final" if result is not None else "preview",
+                                 result=result, start_training=start_training)
         return True
 
     def _import_ply(self, ply_path: str) -> bool:

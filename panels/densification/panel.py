@@ -9,7 +9,6 @@ import uuid
 from pathlib import Path
 from typing import Optional
 import lichtfeld as lf
-import numpy as np
 from lfs_plugins import ScrubFieldController
 from ...core.pipeline.config import DensePipelineConfig
 from .settings import SCRUB_FIELD_SPECS
@@ -19,9 +18,10 @@ from .bindings import DensificationBindings
 from .settings import DensificationSettings
 from .scene import DensificationScene
 from .workflow import DensificationWorkflow
+from .transfer import DensificationTransfer
 
 
-class DensificationPanel(DensificationBindings, DensificationSettings, DensificationScene, DensificationWorkflow, lf.ui.Panel):
+class DensificationPanel(DensificationBindings, DensificationSettings, DensificationScene, DensificationWorkflow, DensificationTransfer, lf.ui.Panel):
     """GUI panel for dense point cloud initialization workflow.
 
     This panel uses cameras already loaded in LichtFeld Studio.
@@ -66,6 +66,8 @@ class DensificationPanel(DensificationBindings, DensificationSettings, Densifica
         self.last_result = None
         self._pending_import = None
         self._pending_error = None
+        self._cloud_update = None
+        self._cancel_requested = False
         self._pending_start_training = False
         self._auto_import = True
         self._write_colmap = False
@@ -82,7 +84,7 @@ class DensificationPanel(DensificationBindings, DensificationSettings, Densifica
             set_value=self._set_scrub_field_value,
         )
 
-        self._target_point_cloud_name: Optional[str] = None
+        self._target_point_cloud_uuid: Optional[str] = None
         self._base_point_cloud_points = None
         self._base_point_cloud_colors = None
         self._active_run_roi_only_selected: Optional[bool] = None
@@ -126,17 +128,3 @@ class DensificationPanel(DensificationBindings, DensificationSettings, Densifica
                     shutil.rmtree(path, ignore_errors=True)
             except Exception:
                 pass
-
-    @staticmethod
-    def _to_lf_tensor(value):
-        if isinstance(value, lf.Tensor):
-            return value
-        return lf.Tensor.from_numpy(np.ascontiguousarray(value), copy=True)
-
-    @staticmethod
-    def _set_point_cloud_data(point_cloud, points, colors):
-        # set_data owns its GPU copies and notifies the scene itself.
-        point_cloud.set_data(
-            DensificationPanel._to_lf_tensor(points),
-            DensificationPanel._to_lf_tensor(colors),
-        )

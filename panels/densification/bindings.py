@@ -3,7 +3,6 @@
 """UI bindings, lifecycle and collapsed sections."""
 
 import lichtfeld as lf
-from .job import DensifyStage, DensifyResult
 
 
 class DensificationBindings:
@@ -75,16 +74,12 @@ class DensificationBindings:
         # --- Job state (read-only) ---
         model.bind_func("show_idle", lambda: not self._is_running())
         model.bind_func("show_running", self._is_running)
-        model.bind_func("stage_text",
-                        lambda: self.job.stage.value.capitalize() if self.job else "Idle")
+        model.bind_func("stage_text", self._display_stage)
         model.bind_func("progress_value",
-                        lambda: f"{max(0.0, min(1.0, self.job.progress / 100.0)):.4f}"
-                        if self.job else "0")
+                        lambda: f"{max(0.0, min(1.0, self._display_progress() / 100.0)):.4f}")
         model.bind_func("progress_pct",
-                        lambda: f"{int(self.job.progress)}%"
-                        if self.job else "0%")
-        model.bind_func("progress_status",
-                        lambda: self.job.status if self.job else "")
+                        lambda: f"{int(self._display_progress())}%")
+        model.bind_func("progress_status", self._display_status)
 
         # --- Result state ---
         model.bind_func("show_results",
@@ -110,27 +105,7 @@ class DensificationBindings:
         self._handle = model.get_handle()
 
     def on_update(self, doc):
-        if self._pending_error is not None:
-            self._pending_import = None  # Discard previews queued before the failure.
-            self._pending_start_training = False
-            if self._preview_override_active:
-                self._restore_base_point_cloud()
-            self._active_run_roi_only_selected = None
-            self.last_result = DensifyResult(success=False, error=self._pending_error)
-            self._pending_error = None
-
-        # Handle pending import on main thread
-        if self._pending_import:
-            output = self._pending_import
-            start_training = self._pending_start_training
-            self._pending_import = None
-            self._pending_start_training = False
-            lf.log.info("Loading dense point cloud")
-            imported = self._import_output(output)
-            if imported and start_training:
-                self._start_training_after_import()
-
-        dirty = False
+        dirty = self._update_cloud_transfer()
 
         if self._sync_scrub_specs():
             dirty = True
@@ -144,10 +119,10 @@ class DensificationBindings:
             self._dirty("show_idle", "show_running")
             dirty = True
 
-        if running and self.job:
-            progress = self.job.progress
-            status = self.job.status
-            stage = self.job.stage.value
+        if running:
+            progress = self._display_progress()
+            status = self._display_status()
+            stage = self._display_stage()
             if (progress != self._last_progress or
                     status != self._last_status or
                     stage != self._last_stage):
@@ -196,18 +171,16 @@ class DensificationBindings:
             self._dirty("has_masks", "use_masks")
             dirty = True
 
-        if self.job and self.job.stage == DensifyStage.CANCELLED and self.last_result is None:
-            self.last_result = self.job.result or DensifyResult(success=False, error="Cancelled")
-            self._pending_start_training = False
-            if self._preview_override_active:
-                self._restore_base_point_cloud()
-            self._active_run_roi_only_selected = None
-            self._dirty("show_results", "show_error", "error_text", "show_idle", "show_running")
-            dirty = True
-
         return dirty
 
     def on_scene_changed(self, doc):
+        if self._target_point_cloud_uuid is not None and self._is_running():
+            scene = lf.get_scene()
+            if scene is None or scene.get_node_by_uuid(self._target_point_cloud_uuid) is None:
+                self._cancel_requested = True
+                self._pending_error = "Densification target is no longer available"
+                if self.job:
+                    self.job.cancel()
         self._last_camera_count = -1
         self._last_selected_camera_count = -1
         self._last_effective_camera_count = -1
@@ -215,7 +188,7 @@ class DensificationBindings:
         # Keep the ROI snapshot alive while a densification job is active or
         # while sequential previews/final import are still being applied.
         if not self._is_running() and not self._pending_import:
-            self._target_point_cloud_name = None
+            self._target_point_cloud_uuid = None
             self._base_point_cloud_points = None
             self._base_point_cloud_colors = None
             self._active_run_roi_only_selected = None
@@ -234,6 +207,11 @@ class DensificationBindings:
             )
 
     def on_unmount(self, doc):
+        self._cancel_requested = True
+        if self.job:
+            self.job.cancel()
+        self._cancel_cloud_update()
+        self._discard_pending_import()
         doc.remove_data_model("densification")
         self._scrub_fields.unmount()
         self._handle = None
