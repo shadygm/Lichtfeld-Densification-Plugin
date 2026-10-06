@@ -143,8 +143,7 @@ def run_dense_pipeline(
             try:
                 tri_ref = future.result()
             except Exception as ex:
-                logger.error(f"Triangulation error for ref {matched.packed.ref_id}: {ex}")
-                return
+                raise RuntimeError(f"Triangulation failed for ref {matched.packed.ref_id}") from ex
             _raise_if_cancelled(cancel_requested)
             if tri_ref is None:
                 return

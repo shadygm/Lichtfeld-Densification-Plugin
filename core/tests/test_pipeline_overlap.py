@@ -34,7 +34,12 @@ class PipelineOverlapTests(unittest.TestCase):
             with self.subTest(cancel=cancel, fail=fail):
                 self.run_pipeline(cancel=cancel, files=True, fail=fail)
 
-    def run_pipeline(self, cancel, mps=False, files=False, fail=False, retain=True):
+    def test_triangulation_errors_fail_mid_run_and_final_drain(self):
+        for ref in (1, 2):
+            with self.subTest(ref=ref):
+                self.run_pipeline(cancel=False, files=True, tri_fail=ref)
+
+    def run_pipeline(self, cancel, mps=False, files=False, fail=False, retain=True, tri_fail=None):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         output = Path(directory.name) / 'final.ply'
@@ -76,6 +81,8 @@ class PipelineOverlapTests(unittest.TestCase):
             if cancel:
                 cancelled.set()
             uid = matched.packed.ref_id
+            if uid == tri_fail:
+                raise ValueError('unexpected geometry failure')
             return _TriangulatedReference(
                 np.full((1, 3), uid, dtype=np.float32), np.zeros((1, 3)),
                 np.zeros(1), (ObservationTracks.from_rows([[(uid, 0., 0.)]]) if retain
@@ -116,6 +123,10 @@ class PipelineOverlapTests(unittest.TestCase):
             elif fail:
                 with self.assertRaisesRegex(RuntimeError, 'loader failed'):
                     run()
+            elif tri_fail:
+                with self.assertRaisesRegex(RuntimeError, f'Triangulation failed for ref {tri_fail}') as caught:
+                    run()
+                self.assertIsInstance(caught.exception.__cause__, ValueError)
             else:
                 result = run()
                 np.testing.assert_array_equal(result.xyz[:, 0], [1, 2])
@@ -131,6 +142,6 @@ class PipelineOverlapTests(unittest.TestCase):
             self.assertEqual(len(temporary_roots), 1)
             self.assertFalse(temporary_roots[0].exists())
             self.assertTrue(all(not path.exists() for path in preview_paths))
-            if not cancel:
+            if not cancel and tri_fail != 1:
                 self.assertGreater(len(preview_paths), 0)
         self.assertEqual(output.read_bytes(), b'keep explicit export')
