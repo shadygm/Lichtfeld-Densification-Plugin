@@ -5,6 +5,7 @@ import os
 import time
 import gc
 from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, List, Optional, Tuple
 
 import logging
@@ -908,6 +909,7 @@ def run_dense_pipeline(
     t0 = time.time()
     matcher: Optional[RomaMatcher] = None
     pack_loader: Optional[ThreadedReferenceLoader[Optional[_PackedReferenceBatch]]] = None
+    triangulator = None
 
     try:
         from .matcher import RomaMatcher, has_cached_romav2_weights
@@ -944,6 +946,38 @@ def run_dense_pipeline(
         pack_loader = _build_pack_loader(refs_local, pack_ctx, config, cancel_requested)
         pack_loader_iter = iter(pack_loader)
 
+        # One CPU task overlaps the next GPU match; consume results in order.
+        triangulator = ThreadPoolExecutor(max_workers=1, thread_name_prefix="triangulation")
+        pending = None
+
+        def finish_pending():
+            nonlocal pending
+            if pending is None:
+                return
+            future, matched, collect_debug, pair_counter = pending
+            pending = None
+            try:
+                tri_ref = future.result()
+            except Exception as ex:
+                logger.error(f"Triangulation error for ref {matched.packed.ref_id}: {ex}")
+                return
+            _raise_if_cancelled(cancel_requested)
+            if tri_ref is None:
+                return
+            points.append(tri_ref)
+            if collect_debug:
+                _emit_debug_previews(
+                    matched_ref=matched, tri_ref=tri_ref, debug_state=debug_state,
+                    cameras=cameras, total_pairs_est=total_pairs_est,
+                    pair_counter=pair_counter, cancel_requested=cancel_requested,
+                )
+            _emit_intermediate_preview(
+                on_sequential_viz=on_sequential_viz,
+                intermediate_ply_base=intermediate_ply_base,
+                viz_interval=viz_interval, points=points,
+                cancel_requested=cancel_requested,
+            )
+
         refs_consumed = 0
         while True:
             _raise_if_cancelled(cancel_requested)
@@ -969,41 +1003,21 @@ def run_dense_pipeline(
             if matched_ref is None:
                 continue
 
+            finish_pending()
             collect_debug_matches = debug_state is not None and debug_state.is_enabled()
-
-            try:
-                tri_ref = _triangulate_ref(
-                    matched_ref,
-                    tri_ctx,
+            pending = (
+                triangulator.submit(
+                    _triangulate_ref, matched_ref, tri_ctx,
                     collect_debug_matches=collect_debug_matches,
-                )
-            except Exception as ex:
-                logger.error(f"Triangulation error for ref {packed.ref_id}: {ex}")
-                tri_ref = None
-
-            if tri_ref is None:
-                continue
-
-            points.append(tri_ref)
-            if collect_debug_matches:
-                _emit_debug_previews(
-                    matched_ref=matched_ref,
-                    tri_ref=tri_ref,
-                    debug_state=debug_state,
-                    cameras=cameras,
-                    total_pairs_est=total_pairs_est,
-                    pair_counter=points.pair_counter,
-                    cancel_requested=cancel_requested,
-                )
-            _emit_intermediate_preview(
-                on_sequential_viz=on_sequential_viz,
-                intermediate_ply_base=intermediate_ply_base,
-                viz_interval=viz_interval,
-                points=points,
-                cancel_requested=cancel_requested,
+                ),
+                matched_ref, collect_debug_matches, points.pair_counter,
             )
 
+        finish_pending()
+
     finally:
+        if triangulator is not None:
+            triangulator.shutdown(wait=True, cancel_futures=True)
         _cleanup_pipeline_runtime(pack_loader, matcher, debug_state)
         pack_loader = None
         matcher = None
