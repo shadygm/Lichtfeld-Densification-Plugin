@@ -9,12 +9,12 @@ simply load your scene, adjust parameters if desired, and click Start.
 
 import os
 import shutil
-import sys
+import struct
 import threading
 import time
 import uuid
 import weakref
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional, List, ClassVar
@@ -22,10 +22,7 @@ from typing import Callable, Optional, List, ClassVar
 import lichtfeld as lf
 import numpy as np
 
-try:
-    from lfs_plugins import ScrubFieldController, ScrubFieldSpec
-except ImportError:
-    from lfs_plugins.scrub_fields import ScrubFieldController, ScrubFieldSpec
+from lfs_plugins import ScrubFieldController, ScrubFieldSpec
 
 from ..core.config import DensePipelineConfig
 from ..core.debug_viz import MatchDebugState
@@ -152,7 +149,6 @@ class DensifyResult:
     output_path: Optional[str] = None
     num_points: int = 0
     elapsed_time: float = 0.0
-    warnings: List[str] = field(default_factory=list)
     error: Optional[str] = None
 
 
@@ -340,11 +336,8 @@ class DensifyJob:
             num_points = 0
             points3d_path = os.path.join(output_path, "points3D.bin") if output_path else ""
             if points3d_path and os.path.exists(points3d_path):
-                points, _colors, _tracks = read_points3D_bin_point_cloud(
-                    points3d_path,
-                    min_track_length=self.config.min_track_length,
-                )
-                num_points = int(points.shape[0])
+                with open(points3d_path, "rb") as output:
+                    num_points = struct.unpack("<Q", output.read(8))[0]
 
             result = DensifyResult(
                 success=True,
@@ -419,8 +412,9 @@ class DensificationPanel(lf.ui.Panel):
 
         self.config = DensePipelineConfig(output_path=self._get_temp_output_path())
         self._voxel_size_ui = 0.01  # remembered slider value when filter is toggled
+        self._scrub_specs = dict(SCRUB_FIELD_SPECS)
         self._scrub_fields = ScrubFieldController(
-            specs=SCRUB_FIELD_SPECS,
+            specs=self._scrub_specs,
             get_value=self._get_scrub_field_value,
             set_value=self._set_scrub_field_value,
         )
@@ -561,22 +555,8 @@ class DensificationPanel(lf.ui.Panel):
         return bool(self.config.roi_only_selected)
 
     @staticmethod
-    def _row_count(data) -> int:
-        shape = getattr(data, "shape", None)
-        if shape is None or len(shape) == 0:
-            return 0
-        return int(shape[0])
-
-    @staticmethod
-    def _read_point_cloud_field(point_cloud, field_name: str):
-        value = getattr(point_cloud, field_name, None)
-        if callable(value):
-            return value()
-        return value
-
-    @staticmethod
     def _coerce_point_cloud_array(value, field_name: str) -> np.ndarray:
-        arr = np.asarray(DensificationPanel._to_numpy_array(value))
+        arr = np.asarray(value.numpy(copy=True) if isinstance(value, lf.Tensor) else value)
         if arr.ndim != 2:
             raise RuntimeError(
                 f"Point cloud field '{field_name}' must be 2D, got shape {arr.shape!r}"
@@ -589,11 +569,8 @@ class DensificationPanel(lf.ui.Panel):
 
         dense_points_np = self._coerce_point_cloud_array(dense_points, "dense_points")
         dense_colors_np = self._coerce_point_cloud_array(dense_colors, "dense_colors")
-        base_points_np = self._coerce_point_cloud_array(self._base_point_cloud_points, "base_points")
-        base_colors_np = self._coerce_point_cloud_array(self._base_point_cloud_colors, "base_colors")
-
-        merged_points_np = np.concatenate((dense_points_np, base_points_np), axis=0)
-        merged_colors_np = np.concatenate((dense_colors_np, base_colors_np), axis=0)
+        merged_points_np = np.concatenate((dense_points_np, self._base_point_cloud_points), axis=0)
+        merged_colors_np = np.concatenate((dense_colors_np, self._base_point_cloud_colors), axis=0)
         return merged_points_np, merged_colors_np
 
     def _capture_base_point_cloud(self) -> bool:
@@ -620,21 +597,15 @@ class DensificationPanel(lf.ui.Panel):
 
         self._target_point_cloud_name = target.name
         self._base_point_cloud_points = self._coerce_point_cloud_array(
-            self._read_point_cloud_field(point_cloud, "means"),
+            point_cloud.means,
             "means",
         )
         self._base_point_cloud_colors = self._coerce_point_cloud_array(
-            self._read_point_cloud_field(point_cloud, "colors"),
+            point_cloud.colors,
             "colors",
         )
         self._preview_override_active = False
 
-        if self._base_point_cloud_points is None or self._base_point_cloud_colors is None:
-            self.last_result = DensifyResult(
-                success=False,
-                error="Failed to read the original point cloud data.",
-            )
-            return False
         return True
 
     def _resolve_target_point_cloud_node(self, scene):
@@ -657,46 +628,10 @@ class DensificationPanel(lf.ui.Panel):
         return None
 
     @staticmethod
-    def _is_lf_tensor(value) -> bool:
-        tensor_type = getattr(lf, "Tensor", None)
-        if tensor_type is None:
-            return False
-        try:
-            return isinstance(value, tensor_type)
-        except TypeError:
-            return False
-
-    @staticmethod
-    def _is_torch_tensor(value) -> bool:
-        torch_mod = sys.modules.get("torch")
-        if torch_mod is not None:
-            try:
-                return bool(torch_mod.is_tensor(value))
-            except Exception:
-                pass
-        value_type = type(value)
-        module = getattr(value_type, "__module__", "")
-        return (
-            (module == "torch" or module.startswith("torch."))
-            and hasattr(value, "detach")
-            and hasattr(value, "cpu")
-        )
-
-    @staticmethod
     def _to_lf_tensor(value, *, copy: bool = True):
-        if DensificationPanel._is_lf_tensor(value):
-            return value.clone() if copy and hasattr(value, "clone") else value
+        if isinstance(value, lf.Tensor):
+            return value.clone() if copy else value
         return lf.Tensor.from_numpy(np.asarray(value), copy=copy)
-
-    @staticmethod
-    def _to_numpy_array(value):
-        if DensificationPanel._is_lf_tensor(value):
-            return np.asarray(value.numpy(copy=True))
-        if DensificationPanel._is_torch_tensor(value):
-            return value.detach().cpu().numpy()
-        if hasattr(value, "numpy") and callable(value.numpy):
-            return np.asarray(value.numpy(copy=True))
-        return np.asarray(value)
 
     def _restore_base_point_cloud(self):
         if self._base_point_cloud_points is None or self._base_point_cloud_colors is None:
@@ -709,9 +644,8 @@ class DensificationPanel(lf.ui.Panel):
             point_cloud = target.point_cloud()
             if point_cloud is None:
                 return
-            point_cloud.set_data(
-                lf.Tensor.from_numpy(np.array(self._base_point_cloud_points, copy=True), copy=True),
-                lf.Tensor.from_numpy(np.array(self._base_point_cloud_colors, copy=True), copy=True),
+            self._set_point_cloud_data(
+                point_cloud, self._base_point_cloud_points, self._base_point_cloud_colors,
             )
             scene.notify_changed()
             self._preview_override_active = False
@@ -772,30 +706,14 @@ class DensificationPanel(lf.ui.Panel):
                     self._set_roi_only_selected)
 
         # --- Slider-bound config values ---
-        model.bind("num_refs",
-                    lambda: f"{self.config.num_refs:.2f}",
-                    lambda v: self._set_float_config("num_refs", v, 0.1, 1.0))
-        model.bind("nns_per_ref",
-                    lambda: str(self.config.nns_per_ref),
-                    lambda v: self._set_int_config("nns_per_ref", v, 1, self._nns_per_ref_max()))
-        model.bind("certainty_thresh",
-                    lambda: f"{self.config.certainty_thresh:.2f}",
-                    lambda v: self._set_float_config("certainty_thresh", v, 0.0, 1.0))
-        model.bind("reproj_thresh",
-                    lambda: f"{self.config.reproj_thresh:.1f}",
-                    lambda v: self._set_float_config("reproj_thresh", v, 0.1, 5.0))
-        model.bind("sampson_thresh",
-                    lambda: f"{self.config.sampson_thresh:.1f}",
-                    lambda v: self._set_float_config("sampson_thresh", v, 0.0, 10.0))
-        model.bind("min_parallax_deg",
-                    lambda: f"{self.config.min_parallax_deg:.1f}",
-                    lambda v: self._set_float_config("min_parallax_deg", v, 0.0, 5.0))
-        model.bind("min_track_length",
-                    lambda: str(self.config.min_track_length),
-                    lambda v: self._set_int_config("min_track_length", v, 0, self._min_track_length_max()))
-        model.bind("viz_interval",
-                    lambda: str(self.config.viz_interval),
-                    lambda v: self._set_int_config("viz_interval", v, 0, 10))
+        for prop, spec in self._scrub_specs.items():
+            if prop == "voxel_size":
+                continue
+            model.bind(
+                prop,
+                lambda prop=prop, spec=spec: spec.fmt % self._get_scrub_field_value(prop),
+                lambda value, prop=prop: self._set_scrub_field_value(prop, value),
+            )
         model.bind("start_training_when_complete",
                     lambda: self._start_training_when_complete,
                     self._set_start_training_when_complete)
@@ -1018,55 +936,17 @@ class DensificationPanel(lf.ui.Panel):
             header.set_class("is-expanded", expanding)
 
     def _get_scrub_field_value(self, prop: str) -> float:
-        if prop == "num_refs":
-            return float(self.config.num_refs)
-        if prop == "nns_per_ref":
-            return float(self.config.nns_per_ref)
-        if prop == "certainty_thresh":
-            return float(self.config.certainty_thresh)
-        if prop == "reproj_thresh":
-            return float(self.config.reproj_thresh)
-        if prop == "sampson_thresh":
-            return float(self.config.sampson_thresh)
-        if prop == "min_parallax_deg":
-            return float(self.config.min_parallax_deg)
-        if prop == "min_track_length":
-            return float(self.config.min_track_length)
-        if prop == "voxel_size":
-            return float(self._voxel_size_ui)
-        if prop == "viz_interval":
-            return float(self.config.viz_interval)
-        raise KeyError(prop)
+        if prop not in SCRUB_FIELD_SPECS:
+            raise KeyError(prop)
+        return float(self._voxel_size_ui if prop == "voxel_size" else getattr(self.config, prop))
 
     def _set_scrub_field_value(self, prop: str, value: float) -> None:
-        if prop == "num_refs":
-            self._set_float_config("num_refs", value, 0.1, 1.0)
-            return
-        if prop == "nns_per_ref":
-            self._set_int_config("nns_per_ref", value, 1, self._nns_per_ref_max())
-            return
-        if prop == "certainty_thresh":
-            self._set_float_config("certainty_thresh", value, 0.0, 1.0)
-            return
-        if prop == "reproj_thresh":
-            self._set_float_config("reproj_thresh", value, 0.1, 5.0)
-            return
-        if prop == "sampson_thresh":
-            self._set_float_config("sampson_thresh", value, 0.0, 10.0)
-            return
-        if prop == "min_parallax_deg":
-            self._set_float_config("min_parallax_deg", value, 0.0, 5.0)
-            return
-        if prop == "min_track_length":
-            self._set_int_config("min_track_length", value, 0, self._min_track_length_max())
-            return
+        spec = self._scrub_specs[prop]
         if prop == "voxel_size":
             self._set_voxel_size(value)
             return
-        if prop == "viz_interval":
-            self._set_int_config("viz_interval", value, 0, 10)
-            return
-        raise KeyError(prop)
+        setter = self._set_int_config if spec.data_type is int else self._set_float_config
+        setter(prop, value, spec.min_value, spec.max_value)
 
     def _sync_scrub_specs(self) -> bool:
         changed = self._update_scrub_spec(
@@ -1088,24 +968,12 @@ class DensificationPanel(lf.ui.Panel):
         return changed
 
     def _update_scrub_spec(self, prop: str, *, max_value: float) -> bool:
-        current_spec = self._scrub_fields._specs[prop]
+        current_spec = self._scrub_specs[prop]
         if abs(current_spec.max_value - max_value) <= 1.0e-9:
             return False
-
-        next_spec = ScrubFieldSpec(
-            min_value=current_spec.min_value,
-            max_value=max_value,
-            step=current_spec.step,
-            fmt=current_spec.fmt,
-            data_type=current_spec.data_type,
-            pixels_per_step=current_spec.pixels_per_step,
-        )
-        self._scrub_fields._specs[prop] = next_spec
-
-        state = self._scrub_fields._fields.get(prop)
-        if state is not None:
-            state.spec = next_spec
-
+        next_spec = replace(current_spec, max_value=max_value)
+        self._scrub_specs[prop] = next_spec
+        self._scrub_fields.set_spec(prop, next_spec)
         return True
 
     # ── Config setters ───────────────────────────────────
@@ -1307,6 +1175,17 @@ class DensificationPanel(lf.ui.Panel):
         self._active_run_roi_only_selected = None
         self.last_result = DensifyResult(success=False, error=str(error))
 
+    def _apply_dense_point_cloud(self, scene, target, point_cloud, points, colors) -> bool:
+        if self._run_roi_only_selected():
+            points, colors = self._build_roi_merge_arrays(points, colors)
+        self._set_point_cloud_data(point_cloud, points, colors)
+        lf.log.debug(f"Updated '{target.name}' with {int(points.shape[0]):,} points")
+        scene.notify_changed()
+        self._preview_override_active = True
+        if not self._is_running() and not self._pending_import:
+            self._active_run_roi_only_selected = None
+        return True
+
     def _import_ply(self, ply_path: str) -> bool:
         """Import the latest dense PLY into the active point cloud."""
         if not ply_path or not os.path.exists(ply_path):
@@ -1333,31 +1212,7 @@ class DensificationPanel(lf.ui.Panel):
                 lf.log.error(f"Node '{target.name}' has no point cloud data")
                 return False
 
-            run_roi_only_selected = self._run_roi_only_selected()
-            if run_roi_only_selected:
-                merged_points_np, merged_colors_np = self._build_roi_merge_arrays(
-                    dense_points,
-                    dense_colors,
-                )
-                self._set_point_cloud_data(point_cloud, merged_points_np, merged_colors_np)
-                out_points = merged_points_np
-                lf.log.debug(
-                    f"Merged ROI dense cloud into '{target.name}' "
-                    f"({self._row_count(out_points):,} total points)"
-                )
-            else:
-                self._set_point_cloud_data(point_cloud, dense_points, dense_colors)
-                out_points = dense_points
-                lf.log.debug(
-                    f"Overwrote '{target.name}' with dense cloud "
-                    f"({self._row_count(out_points):,} points)"
-                )
-
-            scene.notify_changed()
-            self._preview_override_active = True
-            if not self._is_running() and not self._pending_import:
-                self._active_run_roi_only_selected = None
-            return True
+            return self._apply_dense_point_cloud(scene, target, point_cloud, dense_points, dense_colors)
 
         except Exception as e:
             lf.log.error(f"Failed to import PLY: {e}")
@@ -1390,14 +1245,10 @@ class DensificationPanel(lf.ui.Panel):
                 lf.log.error("No point cloud node found to merge into")
                 return False
 
-            _all_points, _all_colors, all_track_lengths = read_points3D_bin_point_cloud(
-                points3d_path,
-                min_track_length=0,
-            )
-            dense_points, dense_colors, track_lengths = read_points3D_bin_point_cloud(
-                points3d_path,
-                min_track_length=self.config.min_track_length,
-            )
+            dense_points, dense_colors, all_track_lengths = read_points3D_bin_point_cloud(points3d_path)
+            keep = all_track_lengths >= max(0, self.config.min_track_length)
+            dense_points, dense_colors = dense_points[keep], dense_colors[keep]
+            track_lengths = all_track_lengths[keep]
             _log_sparse_import_track_stats(
                 all_track_lengths,
                 track_lengths,
@@ -1412,32 +1263,7 @@ class DensificationPanel(lf.ui.Panel):
                 lf.log.error(f"Node '{target.name}' has no point cloud data")
                 return False
 
-            run_roi_only_selected = self._run_roi_only_selected()
-            if run_roi_only_selected:
-                merged_points_np, merged_colors_np = self._build_roi_merge_arrays(
-                    dense_points,
-                    dense_colors,
-                )
-                self._set_point_cloud_data(point_cloud, merged_points_np, merged_colors_np)
-                out_points = merged_points_np
-                lf.log.debug(
-                    f"Merged ROI dense sparse model into '{target.name}' "
-                    f"({self._row_count(out_points):,} total points)"
-                )
-            else:
-                self._set_point_cloud_data(point_cloud, dense_points, dense_colors)
-                out_points = dense_points
-                lf.log.debug(
-                    f"Overwrote '{target.name}' with dense sparse model "
-                    f"({self._row_count(out_points):,} points, "
-                    f"min track={int(track_lengths.min()) if track_lengths.size else 0})"
-                )
-
-            scene.notify_changed()
-            self._preview_override_active = True
-            if not self._is_running() and not self._pending_import:
-                self._active_run_roi_only_selected = None
-            return True
+            return self._apply_dense_point_cloud(scene, target, point_cloud, dense_points, dense_colors)
 
         except Exception as e:
             lf.log.error(f"Failed to import sparse model: {e}")
