@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 from types import SimpleNamespace
+from threading import Thread, current_thread, main_thread
 import unittest
 from unittest.mock import Mock, patch
 
@@ -160,3 +161,48 @@ class PanelStructureTests(unittest.TestCase):
                     panel.on_update(None)  # Host has no scene: importing fails.
                 start_training.assert_not_called()
                 self.assertIsNone(failed_import.cloud)
+                for preview_active in (False, True):
+                    with self.subTest(preview_active=preview_active):
+                        failed = Panel()
+                        base_points = np.zeros((7, 3))
+                        failed._base_point_cloud_points = base_points
+                        failed._base_point_cloud_colors = np.zeros((7, 3), dtype=np.uint8)
+                        failed._active_run_roi_only_selected = True
+                        failed._preview_override_active = preview_active
+                        failed._pending_import = 'stale-preview.ply'
+                        failed._pending_start_training = True
+
+                        def set_data(*args):
+                            self.assertIs(current_thread(), main_thread())
+                            np.testing.assert_array_equal(args[1], base_points)
+                            # A synchronous scene notification must keep the snapshot alive.
+                            failed.on_scene_changed(None)
+                            self.assertIs(failed._base_point_cloud_points, base_points)
+
+                        with patch.object(host, 'get_scene', return_value=None) as get_scene, patch.object(
+                            failed, '_resolve_target_point_cloud_node', return_value=target,
+                        ), patch.object(failed, '_set_point_cloud_data', side_effect=set_data) as setter, patch.object(
+                            failed, '_import_output', side_effect=AssertionError('Stale preview imported'),
+                        ), patch.object(failed, '_start_training_after_import') as start_training:
+                            worker = Thread(target=failed._on_error, args=(RuntimeError('worker failed'),))
+                            worker.start()
+                            worker.join(timeout=2)
+                            self.assertFalse(worker.is_alive())
+                            get_scene.assert_not_called()
+                            setter.assert_not_called()
+                            self.assertIsNone(failed.last_result)
+                            self.assertTrue(failed._is_running())
+                            failed.on_scene_changed(None)
+                            self.assertIs(failed._base_point_cloud_points, base_points)
+                            failed.on_update(None)
+                            self.assertEqual(setter.call_count, int(preview_active))
+                            self.assertFalse(failed.last_result.success)
+                            self.assertEqual(failed.last_result.error, 'worker failed')
+                            self.assertIsNone(failed._pending_import)
+                            self.assertIsNone(failed._pending_error)
+                            self.assertIsNone(failed._active_run_roi_only_selected)
+                            self.assertFalse(failed._pending_start_training)
+                            self.assertFalse(failed._preview_override_active)
+                            failed.on_update(None)
+                            self.assertEqual(setter.call_count, int(preview_active))
+                            start_training.assert_not_called()

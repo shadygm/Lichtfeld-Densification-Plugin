@@ -110,6 +110,15 @@ class DensificationBindings:
         self._handle = model.get_handle()
 
     def on_update(self, doc):
+        if self._pending_error is not None:
+            self._pending_import = None  # Discard previews queued before the failure.
+            self._pending_start_training = False
+            if self._preview_override_active:
+                self._restore_base_point_cloud()
+            self._active_run_roi_only_selected = None
+            self.last_result = DensifyResult(success=False, error=self._pending_error)
+            self._pending_error = None
+
         # Handle pending import on main thread
         if self._pending_import:
             output = self._pending_import

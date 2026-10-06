@@ -16,7 +16,7 @@ class DensificationWorkflow:
             lf.log.warn(f"Failed to start training after densification: {exc}")
 
     def _is_running(self) -> bool:
-        return self.job is not None and self.job.is_running()
+        return self._pending_error is not None or (self.job is not None and self.job.is_running())
 
     def _on_do_start(self, handle, event, args):
         self._start()
@@ -26,6 +26,8 @@ class DensificationWorkflow:
             self.job.cancel()
 
     def _start(self):
+        if self._is_running():
+            return
         if not self._has_training_data():
             lf.log.warn("No training cameras found in scene")
             self.last_result = DensifyResult(
@@ -116,12 +118,9 @@ class DensificationWorkflow:
             self._pending_start_training = False
 
     def _on_error(self, error: Exception):
+        # Worker callback: keep scene changes and snapshot cleanup on the UI thread.
+        self._pending_error = str(error)
         lf.log.error(f"Densification failed: {error}")
-        self._pending_start_training = False
-        if self._preview_override_active:
-            self._restore_base_point_cloud()
-        self._active_run_roi_only_selected = None
-        self.last_result = DensifyResult(success=False, error=str(error))
 
     def _apply_dense_point_cloud(self, target, point_cloud, points, colors) -> bool:
         if self._run_roi_only_selected():
