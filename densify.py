@@ -25,7 +25,7 @@ from .core.config import DensePipelineConfig
 from .core.geometry import K_from_camera, P_from_KRt, cam_center_world, pose_world2cam
 from .core.image_utils import find_image, image_dir, to_uint8_rgb
 from .core.selection import nearest_neighbors, select_cameras_by_visibility, select_cameras_kcenters
-from .core.writers import write_ply, write_points3D_bin, write_sparse_model_bin
+from .core.writers import write_ply, write_ply_vertices, write_points3D_bin, write_sparse_model_bin
 
 if TYPE_CHECKING:
     import pycolmap
@@ -392,32 +392,6 @@ def _load_existing_chunk(path_in: str, expected_metadata: Dict[str, Any]) -> Opt
         return None
 
 
-def _write_ply_vertices(file_obj, xyz: np.ndarray, rgb_uint8: np.ndarray) -> None:
-    if xyz.shape[0] == 0:
-        return
-    if rgb_uint8.dtype != np.uint8:
-        rgb_uint8 = to_uint8_rgb(rgb_uint8)
-    packed = np.empty(
-        xyz.shape[0],
-        dtype=[
-            ("x", "<f4"),
-            ("y", "<f4"),
-            ("z", "<f4"),
-            ("red", "u1"),
-            ("green", "u1"),
-            ("blue", "u1"),
-        ],
-    )
-    xyz32 = xyz.astype(np.float32, copy=False)
-    packed["x"] = xyz32[:, 0]
-    packed["y"] = xyz32[:, 1]
-    packed["z"] = xyz32[:, 2]
-    packed["red"] = rgb_uint8[:, 0]
-    packed["green"] = rgb_uint8[:, 1]
-    packed["blue"] = rgb_uint8[:, 2]
-    packed.tofile(file_obj)
-
-
 def _write_ply_from_npz_chunks(
     output_path: str,
     chunk_paths: Sequence[str],
@@ -472,7 +446,7 @@ end_header
                 if local_idx is not None:
                     xyz = xyz[local_idx]
                     rgb = rgb[local_idx]
-                _write_ply_vertices(f, xyz, rgb)
+                write_ply_vertices(f, xyz, to_uint8_rgb(rgb) if rgb.dtype != np.uint8 else rgb)
             global_offset += count
 
     return output_count, total

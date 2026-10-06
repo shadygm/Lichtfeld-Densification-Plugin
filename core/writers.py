@@ -178,6 +178,19 @@ def read_points3D_bin_point_cloud(
     return xyz, rgb, tracks
 
 
+def write_ply_vertices(file_obj, xyz: np.ndarray, rgb_uint8: np.ndarray) -> None:
+    """Write packed binary vertices in bulk, including intermediate previews."""
+    packed = np.empty(len(xyz), dtype=[
+        ("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
+        ("red", "u1"), ("green", "u1"), ("blue", "u1"),
+    ])
+    for column, name in enumerate(("x", "y", "z")):
+        packed[name] = xyz[:, column]
+    for column, name in enumerate(("red", "green", "blue")):
+        packed[name] = rgb_uint8[:, column]
+    packed.tofile(file_obj)
+
+
 def write_ply(path_out: str, xyz: np.ndarray, rgb_uint8: np.ndarray) -> None:
     N = xyz.shape[0]
     header = f"""ply
@@ -193,6 +206,4 @@ end_header
 """
     with open(path_out, "wb") as f:
         f.write(header.encode("ascii"))
-        for i in range(N):
-            f.write(struct.pack("<fff", float(xyz[i, 0]), float(xyz[i, 1]), float(xyz[i, 2])))
-            f.write(struct.pack("BBB", int(rgb_uint8[i, 0]), int(rgb_uint8[i, 1]), int(rgb_uint8[i, 2])))
+        write_ply_vertices(f, xyz, rgb_uint8)
