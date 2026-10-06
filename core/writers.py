@@ -12,7 +12,7 @@ from .camera_models import CameraRecord
 
 
 def ensure_dir(path: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
 
 
 TrackObservation = Tuple[int, float, float]
@@ -179,6 +179,7 @@ def read_points3D_bin_point_cloud(
 
 
 def write_ply(path_out: str, xyz: np.ndarray, rgb_uint8: np.ndarray) -> None:
+    ensure_dir(path_out)
     N = xyz.shape[0]
     header = f"""ply
 format binary_little_endian 1.0
