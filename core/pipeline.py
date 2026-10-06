@@ -76,16 +76,8 @@ class _PackedReferenceBatch:
 @dataclass(frozen=True)
 class _CameraLookup:
     img_ids: List[int]
-    path_by: Dict[int, str]
-    mask_by: Dict[int, Optional[str]]
-    size_by: Dict[int, Tuple[int, int]]
-    K_by: Dict[int, np.ndarray]
-    R_by: Dict[int, np.ndarray]
-    t_by: Dict[int, np.ndarray]
-    P_by: Dict[int, np.ndarray]
-    C_by: Dict[int, np.ndarray]
-    colmap_camera_by: Dict[int, object]
-    distortion_aware_by: Dict[int, bool]
+    by_id: Dict[int, CameraRecord]
+    distorted_ids: set[int]
 
 
 @dataclass(frozen=True)
@@ -153,16 +145,14 @@ def _pack_reference_batch(
         return None
 
     img_ids = pack_ctx.cameras.img_ids
-    path_by = pack_ctx.cameras.path_by
-    mask_by = pack_ctx.cameras.mask_by
-    size_by = pack_ctx.cameras.size_by
     nn_table = pack_ctx.nn_table
     nns_per_ref = pack_ctx.nns_per_ref
     w_match = pack_ctx.w_match
     h_match = pack_ctx.h_match
 
     ref_id = img_ids[ref_local]
-    ref_path = path_by[ref_id]
+    ref_camera = pack_ctx.cameras.by_id[ref_id]
+    ref_path = ref_camera.image_path
     try:
         imA = load_rgb_resized(ref_path, (w_match, h_match))
     except Exception as exc:
@@ -172,7 +162,7 @@ def _pack_reference_batch(
         return None
 
     maskA_np = None
-    ref_mask_path = mask_by.get(ref_id)
+    ref_mask_path = ref_camera.mask_path
     if ref_mask_path:
         if _is_cancelled(cancel_requested):
             return None
@@ -199,13 +189,14 @@ def _pack_reference_batch(
         if nbr_id == ref_id:
             continue
         try:
-            img_path = path_by[nbr_id]
+            neighbor = pack_ctx.cameras.by_id[nbr_id]
+            img_path = neighbor.image_path
             imB = load_rgb_resized(img_path, (w_match, h_match))
             if _is_cancelled(cancel_requested):
                 return None
 
             maskB_np = None
-            nbr_mask_path = mask_by.get(nbr_id)
+            nbr_mask_path = neighbor.mask_path
             if nbr_mask_path:
                 if _is_cancelled(cancel_requested):
                     return None
@@ -226,7 +217,7 @@ def _pack_reference_batch(
         return None
 
     imA_np = np.asarray(imA, dtype=np.uint8)
-    wA_cam, hA_cam = size_by[ref_id]
+    wA_cam, hA_cam = ref_camera.width, ref_camera.height
     return _PackedReferenceBatch(
         ref_id=ref_id,
         ref_path=ref_path,
@@ -283,19 +274,8 @@ def _raise_if_cancelled(cancel_requested: Optional[Callable[[], bool]]) -> None:
 def _build_camera_lookup(camera_records: List[CameraRecord]) -> _CameraLookup:
     return _CameraLookup(
         img_ids=[cam.uid for cam in camera_records],
-        path_by={cam.uid: cam.image_path for cam in camera_records},
-        mask_by={cam.uid: getattr(cam, "mask_path", None) for cam in camera_records},
-        size_by={cam.uid: (cam.width, cam.height) for cam in camera_records},
-        K_by={cam.uid: cam.K for cam in camera_records},
-        R_by={cam.uid: cam.R for cam in camera_records},
-        t_by={cam.uid: cam.t for cam in camera_records},
-        P_by={cam.uid: cam.P for cam in camera_records},
-        C_by={cam.uid: cam.C for cam in camera_records},
-        colmap_camera_by={cam.uid: cam.colmap_camera for cam in camera_records if cam.colmap_camera is not None},
-        distortion_aware_by={
-            cam.uid: uses_distortion_aware_projection(cam.colmap_camera)
-            for cam in camera_records
-        },
+        by_id={cam.uid: cam for cam in camera_records},
+        distorted_ids={cam.uid for cam in camera_records if uses_distortion_aware_projection(cam.colmap_camera)},
     )
 
 
@@ -514,7 +494,7 @@ def _emit_debug_previews(
                 packed.ref_id,
                 nbr_id,
                 os.path.basename(packed.ref_path),
-                os.path.basename(cameras.path_by[nbr_id]),
+                os.path.basename(cameras.by_id[nbr_id].image_path),
                 pair_idx,
                 total_pairs_val,
                 match_count=int(matches.shape[0]),
@@ -639,14 +619,7 @@ def _triangulate_ref(
     matcher_sample_cap = tri_ctx.matcher_sample_cap
 
     cameras = tri_ctx.cameras
-    size_by = cameras.size_by
-    K_by = cameras.K_by
-    R_by = cameras.R_by
-    t_by = cameras.t_by
-    P_by = cameras.P_by
-    C_by = cameras.C_by
-    colmap_camera_by = cameras.colmap_camera_by
-    distortion_aware_by = cameras.distortion_aware_by
+    ref_camera = cameras.by_id[ref_id]
 
     warp_list = matched_ref.warp_list_cpu
     cert_list = matched_ref.cert_list_cpu
@@ -711,7 +684,8 @@ def _triangulate_ref(
 
     for kidx, nbr_id in enumerate(nn_ids):
         idxs = np.arange(sel_idx.shape[0], dtype=np.int64)
-        wB_cam, hB_cam = size_by[nbr_id]
+        neighbor = cameras.by_id[nbr_id]
+        wB_cam, hB_cam = neighbor.width, neighbor.height
         sxB = wB_cam / float(w_match)
         syB = hB_cam / float(h_match)
 
@@ -725,18 +699,18 @@ def _triangulate_ref(
         cert_pair = selected_certs[kidx]
 
         pair_uses_distortion_aware = bool(
-            distortion_aware_by.get(ref_id, False)
-            or distortion_aware_by.get(nbr_id, False)
+            ref_id in cameras.distorted_ids
+            or nbr_id in cameras.distorted_ids
         )
 
         if (not pair_uses_distortion_aware) and (not config.no_filter) and config.sampson_thresh > 0:
             F = fundamental_from_world2cam(
-                K_by[ref_id],
-                R_by[ref_id],
-                t_by[ref_id],
-                K_by[nbr_id],
-                R_by[nbr_id],
-                t_by[nbr_id],
+                ref_camera.K,
+                ref_camera.R,
+                ref_camera.t,
+                neighbor.K,
+                neighbor.R,
+                neighbor.t,
             )
             se = sampson_error(F, uvA_full[idxs], uvB)
             good = se < float(config.sampson_thresh)
@@ -753,11 +727,11 @@ def _triangulate_ref(
             continue
 
         uvA = uvA_full[idxs]
-        P1, P2 = P_by[ref_id], P_by[nbr_id]
+        P1, P2 = ref_camera.P, neighbor.P
 
         if pair_uses_distortion_aware:
-            cam1 = colmap_camera_by.get(ref_id)
-            cam2 = colmap_camera_by.get(nbr_id)
+            cam1 = ref_camera.colmap_camera
+            cam2 = neighbor.colmap_camera
             if cam1 is None or cam2 is None:
                 logger.warning(
                     "Distortion-aware triangulation requested but COLMAP camera "
@@ -784,20 +758,20 @@ def _triangulate_ref(
             yB = yB[valid_uv]
             cert_pair = cert_pair[valid_uv]
 
-            Rt1 = Rt_from_Rt(R_by[ref_id], t_by[ref_id])
-            Rt2 = Rt_from_Rt(R_by[nbr_id], t_by[nbr_id])
+            Rt1 = Rt_from_Rt(ref_camera.R, ref_camera.t)
+            Rt2 = Rt_from_Rt(neighbor.R, neighbor.t)
             Xi = dlt_triangulate_batch(Rt1, Rt2, uvA_cam, uvB_cam)
 
             err1, valid_proj1 = reprojection_errors_camera(
-                cam1, R_by[ref_id], t_by[ref_id], Xi, uvA_used
+                cam1, ref_camera.R, ref_camera.t, Xi, uvA_used
             )
             err2, valid_proj2 = reprojection_errors_camera(
-                cam2, R_by[nbr_id], t_by[nbr_id], Xi, uvB_used
+                cam2, neighbor.R, neighbor.t, Xi, uvB_used
             )
             err = np.maximum(err1, err2)
             projection_valid = valid_proj1 & valid_proj2
-            cheirality_valid = cheirality_mask_Rt(R_by[ref_id], t_by[ref_id], Xi)
-            cheirality_valid &= cheirality_mask_Rt(R_by[nbr_id], t_by[nbr_id], Xi)
+            cheirality_valid = cheirality_mask_Rt(ref_camera.R, ref_camera.t, Xi)
+            cheirality_valid &= cheirality_mask_Rt(neighbor.R, neighbor.t, Xi)
         else:
             Xi = dlt_triangulate_batch(P1, P2, uvA, uvB)
 
@@ -818,7 +792,7 @@ def _triangulate_ref(
             keep &= err <= float(config.reproj_thresh)
             keep &= cheirality_valid
             if config.min_parallax_deg > 0:
-                keep &= parallax_mask(C_by[ref_id], C_by[nbr_id], Xi, min_deg=config.min_parallax_deg)
+                keep &= parallax_mask(ref_camera.C, neighbor.C, Xi, min_deg=config.min_parallax_deg)
             if not np.any(keep):
                 continue
 
@@ -864,19 +838,19 @@ def _triangulate_ref(
     out_tracks: List[List[Tuple[int, float, float]]] = []
 
     def support_reprojection_error(image_id: int, Xh_point: np.ndarray, uv_obs: np.ndarray) -> float:
-        if distortion_aware_by.get(image_id, False):
-            cam = colmap_camera_by.get(image_id)
+        if image_id in cameras.distorted_ids:
+            cam = cameras.by_id[image_id].colmap_camera
             if cam is None:
                 return float("inf")
             err_cam, _valid = reprojection_errors_camera(
                 cam,
-                R_by[image_id],
-                t_by[image_id],
+                cameras.by_id[image_id].R,
+                cameras.by_id[image_id].t,
                 Xh_point[None, :],
                 uv_obs[None, :],
             )
             return float(err_cam[0])
-        return float(reprojection_errors(P_by[image_id], Xh_point[None, :], uv_obs[None, :])[0])
+        return float(reprojection_errors(cameras.by_id[image_id].P, Xh_point[None, :], uv_obs[None, :])[0])
 
     for sample_idx, candidates in enumerate(candidates_by_sample):
         if not candidates:
@@ -978,9 +952,8 @@ def run_dense_pipeline(
     cameras = _build_camera_lookup(camera_records)
     distortion_models = sorted(
         {
-            camera_model_name(cameras.colmap_camera_by[uid])
-            for uid, enabled in cameras.distortion_aware_by.items()
-            if enabled and uid in cameras.colmap_camera_by
+            camera_model_name(cameras.by_id[uid].colmap_camera)
+            for uid in cameras.distorted_ids
         }
     )
     if distortion_models:
