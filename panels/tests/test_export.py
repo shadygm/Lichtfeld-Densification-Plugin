@@ -78,6 +78,12 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(cloud.colors.dtype, np.uint8)
         self.assertFalse(any('Writing' in call.args[1] for call in progress.call_args_list))
 
+    def test_cpu_preview_callback_reaches_core(self):
+        callback = Mock()
+        code, _ = self.adapter.dense_init_from_lfs([], self.config, on_cloud_preview=callback)
+        self.assertEqual(code, 0)
+        self.assertIs(self.run_pipeline.call_args.kwargs['on_cloud_preview'], callback)
+
     def test_opt_in_export_matches_direct_cloud_after_filter_and_cap(self):
         self.config.max_points = 1
         _, direct = self.adapter.dense_init_from_lfs([], self.config)

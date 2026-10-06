@@ -48,6 +48,23 @@ class AsyncTransferTests(AsyncPanelTestCase):
         self.assertIs(self.panel.last_result, result)
         self.assertEqual(len(self.scene.node.point_cloud().means.array), 3)
 
+    def test_cpu_previews_submit_latest_without_loading_ply(self):
+        first = self.result().cloud
+        latest = self.result(np.full((4, 3), 2., np.float32)).cloud
+        self.panel._on_cloud_preview(first)
+        self.panel._on_cloud_preview(latest)
+        self.panel.on_update(None)
+        self.host.io.load_point_cloud.assert_not_called()
+        ticket = self.panel._cloud_update.ticket
+        self.assertIs(ticket.points, latest.points)
+        self.assertIs(ticket.colors, latest.colors)
+        self.assertEqual(self.panel._cloud_update.kind, 'preview')
+        self.assertIsNone(self.panel.last_result)
+        ticket.publish()
+        self.panel.on_update(None)
+        self.assertIsNone(self.panel.last_result)
+        self.host.start_training.assert_not_called()
+
     def test_failed_or_superseded_final_never_starts_training(self):
         for state in ('failed', 'superseded', 'cancelled'):
             with self.subTest(state=state):

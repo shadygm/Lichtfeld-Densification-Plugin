@@ -58,6 +58,7 @@ class DensifyJob:
         on_sequential_viz: Optional[Callable[[str], None]] = None,
         debug_state: Optional[MatchDebugState] = None,
         write_colmap: bool = False,
+        on_cloud_preview: Optional[Callable[[DenseCloud], None]] = None,
     ):
         self.config = config
         self.camera_nodes = list(camera_nodes) if camera_nodes is not None else None
@@ -67,6 +68,7 @@ class DensifyJob:
         self.on_sequential_viz = on_sequential_viz
         self.debug_state = debug_state
         self.write_colmap = write_colmap
+        self.on_cloud_preview = on_cloud_preview
 
         self._stage = DensifyStage.IDLE
         self._progress = 0.0
@@ -207,6 +209,7 @@ class DensifyJob:
                 self.config,
                 progress_callback=progress_cb,
                 on_sequential_viz=self.on_sequential_viz,
+                on_cloud_preview=self.on_cloud_preview,
                 debug_state=self.debug_state,
                 cancel_requested=check_cancelled,
                 write_colmap=self.write_colmap,

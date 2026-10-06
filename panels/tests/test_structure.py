@@ -90,6 +90,8 @@ class PanelStructureTests(unittest.TestCase):
                 ) as job:
                     panel._start()
                     self.assertTrue(job.call_args.kwargs['write_colmap'])
+                    self.assertIs(job.call_args.kwargs['on_cloud_preview'].__self__, panel)
+                    self.assertNotIn('on_sequential_viz', job.call_args.kwargs)
                     job.return_value.start.assert_called_once()
                 panel.job = None
                 panel._active_run_roi_only_selected = None

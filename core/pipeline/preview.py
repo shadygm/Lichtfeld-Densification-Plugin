@@ -8,6 +8,7 @@ import numpy as np
 from ..images.io import to_uint8_rgb
 from ..previews.matches import MatchPreview, MatchDebugState
 from ..reconstruction.writers import write_ply
+from ..reconstruction.cloud import DenseCloud
 from .types import (
     _CameraLookup,
     _MatchedReference,
@@ -89,11 +90,12 @@ def _emit_intermediate_preview(
     viz_interval: int,
     points: _PipelineAccumulator,
     cancel_requested: Optional[Callable[[], bool]],
+    on_cloud_preview: Optional[Callable[[DenseCloud], None]] = None,
 ) -> None:
     if (
-        not on_sequential_viz
+        not (on_sequential_viz or on_cloud_preview)
         or viz_interval <= 0
-        or not intermediate_ply_base
+        or (on_cloud_preview is None and not intermediate_ply_base)
         or points.pairs_processed % viz_interval != 0
     ):
         return
@@ -102,12 +104,16 @@ def _emit_intermediate_preview(
     try:
         xyz_so_far = np.concatenate(points.xyz_parts, axis=0)
         rgb_so_far = np.concatenate(points.rgb_parts, axis=0)
-        intermediate_ply_path = f"{intermediate_ply_base}_{points.pairs_processed}.ply"
-        write_ply(intermediate_ply_path, xyz_so_far, to_uint8_rgb(rgb_so_far))
+        colors = to_uint8_rgb(rgb_so_far)
+        if on_cloud_preview is not None:
+            on_cloud_preview(DenseCloud(xyz_so_far.astype(np.float32, copy=False), colors))
+        else:
+            intermediate_ply_path = f"{intermediate_ply_base}_{points.pairs_processed}.ply"
+            write_ply(intermediate_ply_path, xyz_so_far, colors)
+            on_sequential_viz(intermediate_ply_path)
         logger.debug(f"Live update: {xyz_so_far.shape[0]:,} points after {points.pairs_processed} refs")
-        on_sequential_viz(intermediate_ply_path)
     except Exception as exc:
-        logger.warning(f"Failed to emit intermediate PLY: {exc}")
+        logger.warning(f"Failed to emit intermediate cloud: {exc}")
 
 
 def _build_filtered_match_preview(

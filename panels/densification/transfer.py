@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 
 import lichtfeld as lf
 import numpy as np
@@ -55,13 +54,6 @@ class DensificationTransfer:
         self._pending_start_training = False
         if isinstance(output, DensifyResult):
             output.cloud = None
-        elif isinstance(output, str) and not os.environ.get("LFS_KEEP_TEMP"):
-            try:
-                os.remove(output)
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                lf.log.warn(f"Failed to remove stale preview: {exc}")
 
     def _recover_cloud(self, error):
         self._cancel_cloud_update()

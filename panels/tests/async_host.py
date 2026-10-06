@@ -103,6 +103,7 @@ class AsyncPanelTestCase(unittest.TestCase):
     def setUpClass(cls):
         cls.host = SimpleNamespace(
             Tensor=Tensor, log=Mock(), get_scene=Mock(), start_training=Mock(),
+            io=SimpleNamespace(load_point_cloud=Mock(side_effect=AssertionError('Synchronous PLY load'))),
             scene=SimpleNamespace(NodeType=SimpleNamespace(POINTCLOUD=1)),
             ui=SimpleNamespace(Panel=object, PanelSpace=SimpleNamespace(MAIN_PANEL_TAB=1),
                                PanelHeightMode=SimpleNamespace(CONTENT=1)),

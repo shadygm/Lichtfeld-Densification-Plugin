@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Start jobs and import preview and completed point clouds."""
 
-import os
 from dataclasses import replace
 import lichtfeld as lf
 from .job import DensifyJob, DensifyResult
+from ...core.reconstruction.cloud import DenseCloud
 
 
 class DensificationWorkflow:
@@ -71,20 +71,19 @@ class DensificationWorkflow:
             camera_nodes=camera_nodes,
             on_complete=self._on_complete,
             on_error=self._on_error,
-            on_sequential_viz=self._on_sequential_viz,
+            on_cloud_preview=self._on_cloud_preview,
             debug_state=self.debug_state,
             write_colmap=self._write_colmap,
         )
         self.job.start()
 
-    def _on_sequential_viz(self, ply_path: str):
+    def _on_cloud_preview(self, cloud: DenseCloud):
         if not self._cancel_requested:
-            self._pending_import = ply_path
+            self._pending_import = cloud
 
-    def _import_output(self, output: str | DensifyResult, *, start_training=False) -> bool:
-        if isinstance(output, str):
-            return self._import_ply(output)
-        cloud = output.cloud
+    def _import_output(self, output: DenseCloud | DensifyResult, *, start_training=False) -> bool:
+        final = isinstance(output, DensifyResult)
+        cloud = output.cloud if final else output
         if cloud is None:
             return False
         try:
@@ -98,14 +97,16 @@ class DensificationWorkflow:
                 lf.log.error(f"Node '{target.name}' has no point cloud data")
                 return False
             return self._apply_dense_point_cloud(target, point_cloud, cloud.points, cloud.colors,
-                                                 result=output, start_training=start_training)
+                                                 result=output if final else None, start_training=start_training)
         except Exception as exc:
             lf.log.error(f"Failed to import dense point cloud: {exc}")
-            self.last_result = DensifyResult(success=False, error=str(exc))
+            if final:
+                self.last_result = DensifyResult(success=False, error=str(exc))
             return False
         finally:
             # The async API owns the immutable inputs until inputs_released.
-            output.cloud = None
+            if final:
+                output.cloud = None
 
     def _on_complete(self, result: DensifyResult):
         if self._cancel_requested:
@@ -139,42 +140,3 @@ class DensificationWorkflow:
                                  kind="final" if result is not None else "preview",
                                  result=result, start_training=start_training)
         return True
-
-    def _import_ply(self, ply_path: str) -> bool:
-        """Import the latest dense PLY into the active point cloud."""
-        if not ply_path or not os.path.exists(ply_path):
-            lf.log.warn(f"PLY file not found: {ply_path}")
-            return False
-
-        try:
-            lf.log.debug(f"Loading PLY: {ply_path}")
-
-            scene = lf.get_scene()
-            if scene is None:
-                lf.log.error("No scene available")
-                return False
-
-            target = self._resolve_target_point_cloud_node(scene)
-            if not target:
-                lf.log.error("No point cloud node found to merge into")
-                return False
-
-            dense_points, dense_colors = lf.io.load_point_cloud(ply_path)
-
-            point_cloud = target.point_cloud()
-            if not point_cloud:
-                lf.log.error(f"Node '{target.name}' has no point cloud data")
-                return False
-
-            return self._apply_dense_point_cloud(target, point_cloud, dense_points, dense_colors)
-
-        except Exception as e:
-            lf.log.error(f"Failed to import PLY: {e}")
-            return False
-        finally:
-            if not os.environ.get("LFS_KEEP_TEMP"):
-                try:
-                    if os.path.exists(ply_path):
-                        os.remove(ply_path)
-                except Exception:
-                    lf.log.warn(f"Failed to delete temp file: {ply_path}")

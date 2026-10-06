@@ -774,6 +774,7 @@ def dense_init_from_lfs(
     debug_state=None,
     cancel_requested: Optional[Callable[[], bool]] = None,
     write_colmap: bool = False,
+    on_cloud_preview: Optional[Callable[[DenseCloud], None]] = None,
 ) -> Tuple[int, str | DenseCloud]:
     np.random.seed(config.seed)
     if progress_callback:
@@ -811,6 +812,7 @@ def dense_init_from_lfs(
             config,
             progress_callback=progress_callback,
             on_sequential_viz=on_sequential_viz,
+            on_cloud_preview=on_cloud_preview,
             debug_state=debug_state,
             cancel_requested=cancel_requested,
         )

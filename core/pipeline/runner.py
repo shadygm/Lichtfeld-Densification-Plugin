@@ -9,6 +9,7 @@ from typing import Callable, List, Optional
 import numpy as np
 import torch
 from ..matching.device import get_device
+from ..reconstruction.cloud import DenseCloud
 from ..cameras.models import CameraRecord
 from .config import DensePipelineConfig
 from ..cameras.geometry import camera_model_name
@@ -49,6 +50,7 @@ def run_dense_pipeline(
     on_sequential_viz: Optional[Callable[[str], None]] = None,
     debug_state: Optional[MatchDebugState] = None,
     cancel_requested: Optional[Callable[[], bool]] = None,
+    on_cloud_preview: Optional[Callable[[DenseCloud], None]] = None,
 ) -> PipelineResult:
     np.random.seed(config.seed)
 
@@ -76,7 +78,9 @@ def run_dense_pipeline(
         debug_state.set_total_pairs(total_pairs_est)
 
     viz_interval = config.viz_interval
-    intermediate_ply_base = _prepare_intermediate_ply_base(config.output_path, viz_interval, on_sequential_viz)
+    intermediate_ply_base = _prepare_intermediate_ply_base(
+        config.output_path, viz_interval, on_sequential_viz if on_cloud_preview is None else None,
+    )
 
     points = _PipelineAccumulator()
     t0 = time.time()
@@ -151,6 +155,7 @@ def run_dense_pipeline(
                 intermediate_ply_base=intermediate_ply_base,
                 viz_interval=viz_interval, points=points,
                 cancel_requested=cancel_requested,
+                on_cloud_preview=on_cloud_preview,
             )
 
         matching_started = time.perf_counter()
