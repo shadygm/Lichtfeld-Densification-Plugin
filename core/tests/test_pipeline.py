@@ -36,6 +36,7 @@ class TriangulationTests(unittest.TestCase):
         cameras = _build_camera_lookup(records)
         self.assertIs(cameras.by_id[1], records[0])
         ctx = _TriangulationContext(cameras, DensePipelineConfig(output_path='', matches_per_ref=8), 0.9, size, size)
+        reference = None
         for debug, retain in ((False, True), (True, True), (False, False)):
             ctx = _TriangulationContext(cameras, ctx.config, .9, size, size, retain_observations=retain)
             np.random.seed(0)
@@ -49,6 +50,11 @@ class TriangulationTests(unittest.TestCase):
                 np.testing.assert_array_equal(result.tracks.camera_ids.reshape(-1, 2),
                                                np.tile([1, 2], (len(result.xyz), 1)))
             self.assertEqual(bool(result.debug_matches_by_nbr), debug)
+            if reference is None:
+                reference = result
+            else:
+                for name in ('xyz', 'rgb', 'err'):
+                    np.testing.assert_array_equal(getattr(result, name), getattr(reference, name))
 
 
 if __name__ == '__main__':

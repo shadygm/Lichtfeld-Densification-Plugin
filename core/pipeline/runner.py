@@ -54,6 +54,7 @@ def run_dense_pipeline(
     on_cloud_preview: Optional[Callable[[DenseCloud], None]] = None,
     retain_observations: bool = True,
 ) -> PipelineResult:
+    """Keep full numeric observations for metrics/export, or just UI lengths."""
     np.random.seed(config.seed)
 
     cameras = _build_camera_lookup(camera_records)

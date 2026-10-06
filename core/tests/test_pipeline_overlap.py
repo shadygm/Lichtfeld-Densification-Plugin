@@ -26,12 +26,15 @@ class PipelineOverlapTests(unittest.TestCase):
     def test_pipeline_passes_mps_to_matcher(self):
         self.run_pipeline(cancel=False, mps=True)
 
+    def test_ui_pipeline_keeps_lengths_without_observation_buffers(self):
+        self.run_pipeline(cancel=False, retain=False)
+
     def test_file_previews_are_removed_on_success_cancel_and_failure(self):
         for cancel, fail in ((False, False), (True, False), (False, True)):
             with self.subTest(cancel=cancel, fail=fail):
                 self.run_pipeline(cancel=cancel, files=True, fail=fail)
 
-    def run_pipeline(self, cancel, mps=False, files=False, fail=False):
+    def run_pipeline(self, cancel, mps=False, files=False, fail=False, retain=True):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         output = Path(directory.name) / 'final.ply'
@@ -68,13 +71,15 @@ class PipelineOverlapTests(unittest.TestCase):
 
         def triangulate(matched, context, **kwargs):
             self.assertIsNot(current_thread(), main_thread())
+            self.assertEqual(context.retain_observations, retain)
             self.assertTrue(next_match.wait(timeout=2))
             if cancel:
                 cancelled.set()
             uid = matched.packed.ref_id
             return _TriangulatedReference(
                 np.full((1, 3), uid, dtype=np.float32), np.zeros((1, 3)),
-                np.zeros(1), ObservationTracks.from_rows([[(uid, 0., 0.)]]), {}, {},
+                np.zeros(1), (ObservationTracks.from_rows([[(uid, 0., 0.)]]) if retain
+                              else ObservationTracks(np.array([1], np.uint32))), {}, {},
             )
 
         def preview(points, **kwargs):
@@ -103,6 +108,7 @@ class PipelineOverlapTests(unittest.TestCase):
                     DensePipelineConfig(output_path=str(output), viz_interval=1),
                     cancel_requested=cancelled.is_set,
                     on_sequential_viz=consume_preview if files else None,
+                    retain_observations=retain,
                 )
             if cancel:
                 with self.assertRaises(PipelineCancelled):
@@ -116,6 +122,7 @@ class PipelineOverlapTests(unittest.TestCase):
                 if not files:
                     self.assertEqual(seen, [1, 2])
                 self.assertEqual(result.pairs_processed, 2)
+                self.assertEqual(result.tracks.has_observations, retain)
             self.assertEqual(mocks['core.matching.roma.RomaMatcher'].call_args.kwargs['device'],
                              'mps' if mps else 'cpu')
         loader.close.assert_called_once_with(wait=True)
