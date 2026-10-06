@@ -1,4 +1,5 @@
 """Binary PLY layout must remain compatible with existing readers."""
+import os
 from pathlib import Path
 import struct
 import tempfile
@@ -23,3 +24,17 @@ class PlyTests(unittest.TestCase):
                                     for point, color in zip(xyz, rgb))
                 self.assertEqual(body, expected)
                 self.assertEqual(len(body), 15 * count)
+
+
+class OutputPathTests(unittest.TestCase):
+    def test_relative_and_nested_output(self):
+        previous = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                os.chdir(directory)
+                for name in ('OUT.ply', 'nested/cloud.ply'):
+                    with self.subTest(name=name):
+                        write_ply(name, np.zeros((1, 3)), np.zeros((1, 3), dtype=np.uint8))
+                        self.assertIn(b'element vertex 1\n', Path(name).read_bytes())
+            finally:
+                os.chdir(previous)
