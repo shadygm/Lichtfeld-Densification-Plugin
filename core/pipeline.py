@@ -313,11 +313,12 @@ def _report_matching_progress(
 ) -> None:
     if progress_callback is None:
         return
-    pct = 10.0 + (float(refs_consumed - 1) / max(1, total_refs)) * 80.0
-    progress_callback(
-        pct,
-        f"Matching {refs_consumed}/{total_refs} | {refs_consumed / max(0.001, time.time() - start_time):.1f} it/s",
-    )
+    pct = 10.0 + (float(refs_consumed) / max(1, total_refs)) * 80.0
+    message = f"Matching {refs_consumed}/{total_refs}"
+    if refs_consumed:
+        elapsed = max(0.001, time.perf_counter() - start_time)
+        message += f" | {refs_consumed / elapsed:.1f} it/s"
+    progress_callback(pct, message)
 
 
 def _report_model_setup_status(
@@ -987,7 +988,9 @@ def run_dense_pipeline(
                 cancel_requested=cancel_requested,
             )
 
+        matching_started = time.perf_counter()
         refs_consumed = 0
+        _report_matching_progress(progress_callback, 0, total_refs, matching_started)
         while True:
             _raise_if_cancelled(cancel_requested)
             try:
@@ -996,7 +999,6 @@ def run_dense_pipeline(
                 break
 
             refs_consumed += 1
-            _report_matching_progress(progress_callback, refs_consumed, total_refs, t0)
 
             if packed is None:
                 continue
@@ -1009,6 +1011,7 @@ def run_dense_pipeline(
                 pair_counter=points.pair_counter,
                 cancel_requested=cancel_requested,
             )
+            _report_matching_progress(progress_callback, refs_consumed, total_refs, matching_started)
             if matched_ref is None:
                 continue
 
