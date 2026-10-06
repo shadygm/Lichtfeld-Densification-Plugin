@@ -7,7 +7,7 @@ import gc
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
-import lichtfeld as lf
+import logging
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -34,6 +34,8 @@ from .debug_viz import MatchPreview, MatchDebugState
 from .sampling import select_samples_with_coverage
 from .threaded_dataloader import ThreadedReferenceLoader
 from .writers import write_ply
+
+logger = logging.getLogger(__name__)
 
 # How often to generate a debug preview (every N pairs). 0 = every pair.
 _DEBUG_PREVIEW_INTERVAL = 3
@@ -164,7 +166,7 @@ def _pack_reference_batch(
     try:
         imA = load_rgb_resized(ref_path, (w_match, h_match))
     except Exception as exc:
-        lf.log.warn(f"Failed to load reference {ref_path}: {exc}")
+        logger.warning(f"Failed to load reference {ref_path}: {exc}")
         return None
     if _is_cancelled(cancel_requested):
         return None
@@ -178,7 +180,7 @@ def _pack_reference_batch(
             maskA_np = load_mask_resized_np(ref_mask_path, (w_match, h_match))
             imA = apply_mask_to_rgb(imA, maskA_np)
         except Exception as exc:
-            lf.log.warn(f"Failed to load/apply mask for reference {ref_id}: {exc}")
+            logger.warning(f"Failed to load/apply mask for reference {ref_id}: {exc}")
             maskA_np = None
 
     local_nns = nn_table[ref_local][:nns_per_ref]
@@ -211,14 +213,14 @@ def _pack_reference_batch(
                     maskB_np = load_mask_resized_np(nbr_mask_path, (w_match, h_match))
                     imB = apply_mask_to_rgb(imB, maskB_np)
                 except Exception as exc:
-                    lf.log.warn(f"Failed to load/apply mask for neighbor {nbr_id}: {exc}")
+                    logger.warning(f"Failed to load/apply mask for neighbor {nbr_id}: {exc}")
                     maskB_np = None
 
             nn_ids.append(nbr_id)
             nn_masks.append(maskB_np)
             nn_arrays.append(np.asarray(imB, dtype=np.uint8))
         except Exception as exc:
-            lf.log.warn(f"Failed to load neighbor {nbr_id}: {exc}")
+            logger.warning(f"Failed to load neighbor {nbr_id}: {exc}")
 
     if not nn_arrays:
         return None
@@ -269,7 +271,7 @@ def _is_cancelled(cancel_requested: Optional[Callable[[], bool]]) -> bool:
     try:
         return bool(cancel_requested())
     except Exception as exc:
-        lf.log.warn(f"Cancellation callback failed: {exc}")
+        logger.warning(f"Cancellation callback failed: {exc}")
         return False
 
 
@@ -347,12 +349,12 @@ def _report_model_setup_status(
         msg = "Installing model weights..."
     if progress_callback is not None:
         progress_callback(10.0, msg)
-    lf.log.info(msg)
+    logger.info(msg)
     if not model_cached:
         from .matcher import romav2_cached_weights_paths
 
         cache_hints = ", ".join(romav2_cached_weights_paths())
-        lf.log.info(f"RoMaV2 weights not found in cache; expected cache paths: {cache_hints}")
+        logger.info(f"RoMaV2 weights not found in cache; expected cache paths: {cache_hints}")
 
 
 def _build_pack_loader(
@@ -520,7 +522,7 @@ def _emit_debug_previews(
             if preview:
                 debug_state.submit_preview(preview)
         except Exception as exc:
-            lf.log.warn(f"Debug preview failed: {exc}")
+            logger.warning(f"Debug preview failed: {exc}")
 
 
 def _emit_intermediate_preview(
@@ -544,10 +546,10 @@ def _emit_intermediate_preview(
         rgb_so_far = np.concatenate(points.rgb_parts, axis=0)
         intermediate_ply_path = f"{intermediate_ply_base}_{points.pairs_processed}.ply"
         write_ply(intermediate_ply_path, xyz_so_far, to_uint8_rgb(rgb_so_far))
-        lf.log.debug(f"Live update: {xyz_so_far.shape[0]:,} points after {points.pairs_processed} refs")
+        logger.debug(f"Live update: {xyz_so_far.shape[0]:,} points after {points.pairs_processed} refs")
         on_sequential_viz(intermediate_ply_path)
     except Exception as exc:
-        lf.log.warn(f"Failed to emit intermediate PLY: {exc}")
+        logger.warning(f"Failed to emit intermediate PLY: {exc}")
 
 
 def _cleanup_pipeline_runtime(
@@ -561,7 +563,7 @@ def _cleanup_pipeline_runtime(
         try:
             matcher.close()
         except Exception as exc:
-            lf.log.warn(f"Matcher cleanup failed: {exc}")
+            logger.warning(f"Matcher cleanup failed: {exc}")
     if debug_state:
         debug_state.release_waiters()
 
@@ -757,7 +759,7 @@ def _triangulate_ref(
             cam1 = colmap_camera_by.get(ref_id)
             cam2 = colmap_camera_by.get(nbr_id)
             if cam1 is None or cam2 is None:
-                lf.log.warn(
+                logger.warning(
                     "Distortion-aware triangulation requested but COLMAP camera "
                     f"metadata is missing for pair {ref_id}->{nbr_id}; skipping pair."
                 )
@@ -983,11 +985,11 @@ def run_dense_pipeline(
     )
     if distortion_models:
         msg = "Distortion-aware COLMAP projection enabled: " + ", ".join(distortion_models)
-        lf.log.info(msg)
+        logger.info(msg)
         if progress_callback is not None:
             progress_callback(3.0, msg)
         if config.sampson_thresh > 0:
-            lf.log.info(
+            logger.info(
                 "Sampson pre-filter is skipped for distortion-aware camera pairs; "
                 "reprojection, cheirality, and parallax filters remain active."
             )
@@ -1074,7 +1076,7 @@ def run_dense_pipeline(
                     collect_debug_matches=collect_debug_matches,
                 )
             except Exception as ex:
-                lf.log.error(f"Triangulation error for ref {packed.ref_id}: {ex}")
+                logger.error(f"Triangulation error for ref {packed.ref_id}: {ex}")
                 tri_ref = None
 
             if tri_ref is None:

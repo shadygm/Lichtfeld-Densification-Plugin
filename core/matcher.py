@@ -7,10 +7,12 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-import lichtfeld as lf
+import logging
 import torch
 import torch.nn.functional as F
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 _ROOT = Path(__file__).resolve().parent.parent
 _ROMA_SRC = _ROOT / "RoMaV2" / "src"
@@ -93,7 +95,7 @@ class RomaMatcher:
         self.w_resized = self.model.W_lr
         self.h_resized = self.model.H_lr
         self._grid_cache: Dict[Tuple[int, int], torch.Tensor] = {}
-        lf.log.info(
+        logger.info(
             f"RoMaV2 initialized (setting={setting}, H_lr={self.model.H_lr}, W_lr={self.model.W_lr}, device={device})"
         )
 
