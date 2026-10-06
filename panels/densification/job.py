@@ -12,6 +12,7 @@ import lichtfeld as lf
 from ...core.pipeline.config import DensePipelineConfig
 from ...core.reconstruction.cloud import DenseCloud
 from ...core.previews.matches import MatchDebugState
+from ...core.runtime.memory import release_free_memory
 
 
 class DensifyStage(Enum):
@@ -257,3 +258,4 @@ class DensifyJob:
             self.camera_nodes = None
             if self.debug_state:
                 self.debug_state.release_waiters()
+            release_free_memory()

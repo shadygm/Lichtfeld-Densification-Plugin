@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 from types import ModuleType, SimpleNamespace
+from threading import current_thread, main_thread
 import unittest
 from unittest.mock import Mock, patch
 
@@ -157,6 +158,28 @@ class ExportTests(unittest.TestCase):
         np.testing.assert_array_equal(capped[2], self.raw.err[2:])
         self.assertIs(capped[3][0], self.raw.tracks[2])
         self.assertEqual([len(track) for track in self.raw.tracks], [1, 2, 2])
+
+    def test_allocator_cleanup_runs_on_worker_after_success_error_and_cancel(self):
+        for outcome in ('success', 'error', 'cancel'):
+            with self.subTest(outcome=outcome):
+                self.run_pipeline.side_effect = RuntimeError('pipeline failed') if outcome == 'error' else None
+                job = self.jobs.DensifyJob(self.config, camera_nodes=[object(), object()])
+                if outcome == 'cancel':
+                    job.cancel()
+                calls = []
+
+                def release():
+                    self.assertIsNot(current_thread(), main_thread())
+                    self.assertIsNone(job.camera_nodes)
+                    calls.append(current_thread())
+
+                with patch.object(self.jobs, 'release_free_memory', side_effect=release):
+                    job.start()
+                    job.wait(timeout=5)
+                self.assertFalse(job._thread.is_alive())
+                self.assertEqual(len(calls), 1)
+                expected = {'success': 'DONE', 'error': 'ERROR', 'cancel': 'CANCELLED'}[outcome]
+                self.assertEqual(job.stage, getattr(self.jobs.DensifyStage, expected))
 
     def test_distance_filter_preserves_track_then_error_priority(self):
         xyz = np.array([[.1, 0., 0.], [.2, 0., 0.], [.3, 0., 0.], [1.1, 0., 0.]])
