@@ -171,7 +171,9 @@ class RoMaV2(nn.Module):
         f_B = self.f(img_B_lr)
         # match feats
         matcher_output = self.matcher(
-            list(f_list_A), f_B, img_A=img_A_lr, img_B=img_B_lr, bidirectional=self.bidirectional
+            # The prediction head replaces the final feature in each list.
+            # Keep both cached descriptor lists intact across matching pairs.
+            list(f_list_A), list(f_B), img_A=img_A_lr, img_B=img_B_lr, bidirectional=self.bidirectional
         )
         # return matcher_output
         predictions["matcher"] = matcher_output
