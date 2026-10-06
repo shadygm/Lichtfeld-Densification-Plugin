@@ -361,8 +361,8 @@ def _build_pack_loader(
     config: DensePipelineConfig,
     cancel_requested: Optional[Callable[[], bool]],
 ) -> ThreadedReferenceLoader[Optional[_PackedReferenceBatch]]:
-    prefetch_packages = max(1, int(getattr(config, "prefetch_packages", 8)))
-    pack_workers = max(1, int(getattr(config, "pack_workers", 4)))
+    prefetch_packages = max(1, int(config.prefetch_packages))
+    pack_workers = max(1, int(config.pack_workers))
     dataset = _PackedReferenceDataset(
         refs_local=refs_local,
         pack_ctx=pack_ctx,
@@ -670,15 +670,11 @@ def _triangulate_ref(
     if sel_idx.size == 0:
         return None
 
-    nn_idx_flat = best_k.reshape(-1).numpy()[sel_idx]
     selected_warps = warp_stack.reshape(len(nn_ids), -1, 4)[:, sel_idx, :].numpy()
     selected_certs = cert_stack.reshape(len(nn_ids), -1)[:, sel_idx].numpy()
     sel = agg[sel_idx]
     xA = (sel[:, 0] + 1.0) * 0.5 * (w_match - 1)
     yA = (sel[:, 1] + 1.0) * 0.5 * (h_match - 1)
-    xB_norm = sel[:, 2]
-    yB_norm = sel[:, 3]
-    cert_sel = best_cert.reshape(-1).numpy()[sel_idx]
 
     hA_img, wA_img = imA_np.shape[0], imA_np.shape[1]
     sxA_img = wA_img / float(w_match)
@@ -785,7 +781,6 @@ def _triangulate_ref(
             xB = xB[valid_uv]
             yB = yB[valid_uv]
             cert_pair = cert_pair[valid_uv]
-            rgb_used = rgb_ref[idxs]
 
             Rt1 = Rt_from_Rt(R_by[ref_id], t_by[ref_id])
             Rt2 = Rt_from_Rt(R_by[nbr_id], t_by[nbr_id])
@@ -810,7 +805,6 @@ def _triangulate_ref(
             projection_valid = np.isfinite(err)
             cheirality_valid = cheirality_mask(P1, Xi)
             cheirality_valid &= cheirality_mask(P2, Xi)
-            rgb_used = rgb_ref[idxs]
 
         if config.no_filter:
             finite_mask = np.isfinite(Xi).all(axis=1) & np.isfinite(err) & projection_valid

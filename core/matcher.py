@@ -5,7 +5,7 @@ import gc
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, cast
+from typing import Dict, List, Tuple
 
 import lichtfeld as lf
 import torch
@@ -163,17 +163,11 @@ class RomaMatcher:
             )
         else:
             img_A_hr = None
-        match_from_features_fn = getattr(model, "match_from_features", None)
-        if not callable(match_from_features_fn):
-            raise RuntimeError(
-                "Loaded RoMaV2 instance has no match_from_features(). "
-                "Please ensure the local RoMaV2 sources are reloaded."
-            )
         f_list_A = model.f(img_A_lr)
-        results: List[Optional[Tuple[torch.Tensor, torch.Tensor]]] = [None] * len(imB_list)
+        results: List[Tuple[torch.Tensor, torch.Tensor]] = []
 
-        for nbr_idx, imB in enumerate(imB_list):
-            preds = match_from_features_fn(
+        for imB in imB_list:
+            preds = model.match_from_features(
                 f_list_A=f_list_A,
                 img_A_lr=img_A_lr,
                 imB=imB,
@@ -184,7 +178,7 @@ class RomaMatcher:
             H, W = overlap_AB_hw.shape
             gridA = self._get_reference_grid(H, W)
             warp = torch.cat([gridA, warp_AB_hw], dim=-1)
-            results[nbr_idx] = (warp.contiguous(), overlap_AB_hw.contiguous())
+            results.append((warp.contiguous(), overlap_AB_hw.contiguous()))
             del preds, warp_AB_hw, overlap_AB_hw, warp
 
         del f_list_A
@@ -192,7 +186,7 @@ class RomaMatcher:
         if img_A_hr is not None:
             del img_A_hr
 
-        return cast(List[Tuple[torch.Tensor, torch.Tensor]], results)
+        return results
 
     @torch.inference_mode()
     def match_grids(self, imA: Image.Image, imB: Image.Image) -> Tuple[torch.Tensor, torch.Tensor]:
