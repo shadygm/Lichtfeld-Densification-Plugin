@@ -58,7 +58,7 @@ class DensificationBindings:
         # --- Number-input config values ---
         model.bind("matches_per_ref_str",
                     lambda: str(self.config.matches_per_ref),
-                    lambda v: self._set_int_config("matches_per_ref", v, 1000, 15000))
+                    lambda v: self._set_int_config("matches_per_ref", v, 1000, 30000))
         model.bind("max_points_str",
                     lambda: str(self.config.max_points),
                     lambda v: self._set_int_config("max_points", v, 0, 10000000))

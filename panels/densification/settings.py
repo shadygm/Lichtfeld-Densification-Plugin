@@ -207,7 +207,7 @@ class DensificationSettings:
         new_val = current + direction * step
 
         range_map = {
-            "matches_per_ref": (1000, 15000),
+            "matches_per_ref": (1000, 30000),
             "max_points": (0, 10000000),
         }
         vmin, vmax = range_map.get(field_name, (0, 999999999))
