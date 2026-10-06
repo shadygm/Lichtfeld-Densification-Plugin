@@ -12,12 +12,7 @@ PINHOLE_CAMERA_MODELS = {"PINHOLE", "SIMPLE_PINHOLE"}
 
 
 def camera_model_name(cam: Optional[pycolmap.Camera]) -> str:
-    if cam is None:
-        return ""
-    try:
-        return str(cam.model.name).upper()
-    except Exception:
-        return str(getattr(cam, "model", "")).upper()
+    return "" if cam is None else cam.model.name
 
 
 def uses_distortion_aware_projection(cam: Optional[pycolmap.Camera]) -> bool:
@@ -27,38 +22,15 @@ def uses_distortion_aware_projection(cam: Optional[pycolmap.Camera]) -> bool:
 
 
 def K_from_camera(cam: pycolmap.Camera) -> np.ndarray:
-    K = np.eye(3, dtype=np.float32)
-    model = str(cam.model.name).upper()
-    p = np.asarray(cam.params, dtype=np.float32)
-    w, h = cam.width, cam.height
-    if "PINHOLE" in model and "SIMPLE" not in model:
-        fx, fy, cx, cy = p[0], p[1], p[2], p[3]
-    elif "SIMPLE_PINHOLE" in model:
-        fx = fy = p[0]
-        cx, cy = p[1], p[2]
-    elif "SIMPLE_RADIAL" in model or model == "RADIAL":
-        fx = fy = p[0]
-        cx, cy = p[1], p[2]
-    elif "OPENCV" in model or "FISHEYE" in model:
-        fx, fy, cx, cy = p[0], p[1], p[2], p[3]
-    else:
-        fx = fy = p[0]
-        cx = p[1] if len(p) > 1 else w / 2
-        cy = p[2] if len(p) > 2 else h / 2
-    K[0, 0], K[1, 1], K[0, 2], K[1, 2] = fx, fy, cx, cy
-    return K
+    return np.asarray(cam.calibration_matrix(), dtype=np.float32)
 
 
 def pose_world2cam(im: pycolmap.Image) -> Tuple[np.ndarray, np.ndarray]:
-    if hasattr(im, "cam_from_world"):
-        cfw = im.cam_from_world
-        cfw = cfw() if callable(cfw) else cfw
-        R = np.asarray(cfw.rotation.matrix(), dtype=np.float32)
-        t = np.asarray(cfw.translation, dtype=np.float32).reshape(3, 1)
-    else:
-        R = im.qvec.to_rotation_matrix()
-        t = np.asarray(im.tvec, dtype=np.float32).reshape(3, 1)
-    return R, t
+    pose = im.cam_from_world()
+    return (
+        np.asarray(pose.rotation.matrix(), dtype=np.float32),
+        np.asarray(pose.translation, dtype=np.float32).reshape(3, 1),
+    )
 
 
 def P_from_KRt(K: np.ndarray, R: np.ndarray, t: np.ndarray) -> np.ndarray:
@@ -96,13 +68,6 @@ def dlt_triangulate_batch(P1, P2, uv1, uv2):
     A[:,1,:] = v1 * p12 - p11
     A[:,2,:] = u2 * p22 - p20
     A[:,3,:] = v2 * p22 - p21
-
-    if N == 1:
-        # Avoid batch SVD collapse
-        _, _, Vt = np.linalg.svd(A[0])
-        Xh = Vt[-1]
-        w = Xh[3] if abs(Xh[3]) > 1e-12 else 1e-12
-        return (Xh / w)[None, :]
 
     _, _, Vt = np.linalg.svd(A)
     Xh = Vt[:, -1, :]
