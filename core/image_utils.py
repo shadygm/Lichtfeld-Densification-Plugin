@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-from functools import lru_cache
 from typing import Optional, Tuple
 
 import numpy as np
@@ -80,7 +79,6 @@ def find_image(root: str, name: str) -> str:
     raise FileNotFoundError(f"Image '{name}' not found under {root}")
 
 
-@lru_cache(maxsize=4096)
 def load_mask_resized_np(
     path: str,
     size: Tuple[int, int],
@@ -125,7 +123,6 @@ def apply_mask_to_rgb(im: Image.Image, mask01: np.ndarray) -> Image.Image:
     return Image.fromarray(rgb, mode="RGB")
 
 
-@lru_cache(maxsize=4096)
 def load_rgb_resized(path: str, size: Tuple[int, int]) -> Image.Image:
     """Load an RGB image and resize it to the requested size."""
     im = _open_image(path).convert("RGB")

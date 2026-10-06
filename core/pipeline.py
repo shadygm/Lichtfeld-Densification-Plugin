@@ -6,6 +6,7 @@ import time
 import gc
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from typing import Callable, Dict, List, Optional, Tuple
 
 import logging
@@ -88,6 +89,26 @@ class _PackContext:
     nns_per_ref: int
     w_match: int
     h_match: int
+    load_image: Callable = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        cameras, size = self.cameras.by_id, (self.w_match, self.h_match)
+
+        @lru_cache(maxsize=256)
+        def load_image(uid):
+            camera = cameras[uid]
+            image = load_rgb_resized(camera.image_path, size)
+            mask = None
+            if camera.mask_path:
+                try:
+                    mask = load_mask_resized_np(camera.mask_path, size)
+                    image = apply_mask_to_rgb(image, mask)
+                except Exception as exc:
+                    logger.warning(f"Failed to load/apply mask for image {uid}: {exc}")
+                    mask = None
+            return np.asarray(image, dtype=np.uint8), mask
+
+        object.__setattr__(self, "load_image", load_image)
 
 
 @dataclass
@@ -148,31 +169,16 @@ def _pack_reference_batch(
     img_ids = pack_ctx.cameras.img_ids
     nn_table = pack_ctx.nn_table
     nns_per_ref = pack_ctx.nns_per_ref
-    w_match = pack_ctx.w_match
-    h_match = pack_ctx.h_match
-
     ref_id = img_ids[ref_local]
     ref_camera = pack_ctx.cameras.by_id[ref_id]
     ref_path = ref_camera.image_path
     try:
-        imA = load_rgb_resized(ref_path, (w_match, h_match))
+        imA_np, maskA_np = pack_ctx.load_image(ref_id)
     except Exception as exc:
         logger.warning(f"Failed to load reference {ref_path}: {exc}")
         return None
     if _is_cancelled(cancel_requested):
         return None
-
-    maskA_np = None
-    ref_mask_path = ref_camera.mask_path
-    if ref_mask_path:
-        if _is_cancelled(cancel_requested):
-            return None
-        try:
-            maskA_np = load_mask_resized_np(ref_mask_path, (w_match, h_match))
-            imA = apply_mask_to_rgb(imA, maskA_np)
-        except Exception as exc:
-            logger.warning(f"Failed to load/apply mask for reference {ref_id}: {exc}")
-            maskA_np = None
 
     local_nns = nn_table[ref_local][:nns_per_ref]
     if len(local_nns) == 0:
@@ -190,34 +196,19 @@ def _pack_reference_batch(
         if nbr_id == ref_id:
             continue
         try:
-            neighbor = pack_ctx.cameras.by_id[nbr_id]
-            img_path = neighbor.image_path
-            imB = load_rgb_resized(img_path, (w_match, h_match))
+            imB_np, maskB_np = pack_ctx.load_image(nbr_id)
             if _is_cancelled(cancel_requested):
                 return None
 
-            maskB_np = None
-            nbr_mask_path = neighbor.mask_path
-            if nbr_mask_path:
-                if _is_cancelled(cancel_requested):
-                    return None
-                try:
-                    maskB_np = load_mask_resized_np(nbr_mask_path, (w_match, h_match))
-                    imB = apply_mask_to_rgb(imB, maskB_np)
-                except Exception as exc:
-                    logger.warning(f"Failed to load/apply mask for neighbor {nbr_id}: {exc}")
-                    maskB_np = None
-
             nn_ids.append(nbr_id)
             nn_masks.append(maskB_np)
-            nn_arrays.append(np.asarray(imB, dtype=np.uint8))
+            nn_arrays.append(imB_np)
         except Exception as exc:
             logger.warning(f"Failed to load neighbor {nbr_id}: {exc}")
 
     if not nn_arrays:
         return None
 
-    imA_np = np.asarray(imA, dtype=np.uint8)
     wA_cam, hA_cam = ref_camera.width, ref_camera.height
     return _PackedReferenceBatch(
         ref_id=ref_id,
@@ -914,6 +905,7 @@ def run_dense_pipeline(
     matcher: Optional[RomaMatcher] = None
     pack_loader: Optional[ThreadedReferenceLoader[Optional[_PackedReferenceBatch]]] = None
     triangulator = None
+    pack_ctx = None
 
     try:
         from .matcher import RomaMatcher, has_cached_romav2_weights
@@ -1026,6 +1018,8 @@ def run_dense_pipeline(
         if triangulator is not None:
             triangulator.shutdown(wait=True, cancel_futures=True)
         _cleanup_pipeline_runtime(pack_loader, matcher, debug_state)
+        if pack_ctx is not None:
+            pack_ctx.load_image.cache_clear()
         pack_loader = None
         matcher = None
         gc.collect()
