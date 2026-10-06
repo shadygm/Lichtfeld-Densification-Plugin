@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from collections import OrderedDict
 
-import gc
 import os
 import sys
 from pathlib import Path
@@ -136,27 +135,15 @@ class RomaMatcher:
         )
 
     def close(self) -> None:
-        """Release model weights and CUDA allocations for this matcher."""
+        """Release this matcher's weights and cached tensors."""
         model = getattr(self, "model", None)
         if model is None:
             return
         self._image_cache.clear()
         model.f.cache.clear()
         model.refiner_features.cache.clear()
-        try:
-            model.to("cpu")
-        except Exception:
-            pass
         self.model = None
         self._grid_cache.clear()
-        gc.collect()
-        if torch.cuda.is_available():
-            try:
-                torch.cuda.synchronize()
-            except Exception:
-                pass
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
 
     def __del__(self):
         try:
