@@ -56,6 +56,16 @@ class TriangulationTests(unittest.TestCase):
                 for name in ('xyz', 'rgb', 'err'):
                     np.testing.assert_array_equal(getattr(result, name), getattr(reference, name))
 
+        # A confident pair must not make a rejected neighbor eligible for fusion.
+        packed.nn_ids.append(2)
+        bad_warp = warp.clone()
+        bad_warp[..., 2] -= disparity
+        matched.warp_list_cpu.append(bad_warp)
+        matched.cert_list_cpu.append(torch.zeros(size, size))
+        np.random.seed(0)
+        filtered = _triangulate_ref(matched, ctx)
+        np.testing.assert_array_equal(filtered.xyz, reference.xyz)
+
 
 if __name__ == '__main__':
     unittest.main()

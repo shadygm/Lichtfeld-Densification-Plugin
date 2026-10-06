@@ -102,13 +102,15 @@ def _triangulate_ref(
 
     for kidx, nbr_id in enumerate(nn_ids):
         idxs = np.arange(sel_idx.shape[0], dtype=np.int64)
+        if not config.no_filter:
+            idxs = idxs[selected_certs[kidx] > 0]
         neighbor = cameras.by_id[nbr_id]
         wB_cam, hB_cam = neighbor.width, neighbor.height
         sxB = wB_cam / float(w_match)
         syB = hB_cam / float(h_match)
 
-        xB_norm_k = selected_warps[kidx, :, 2]
-        yB_norm_k = selected_warps[kidx, :, 3]
+        xB_norm_k = selected_warps[kidx, idxs, 2]
+        yB_norm_k = selected_warps[kidx, idxs, 3]
         xB = (xB_norm_k + 1.0) * 0.5 * (w_match - 1)
         yB = (yB_norm_k + 1.0) * 0.5 * (h_match - 1)
         uvB = np.stack([xB * sxB, yB * syB], axis=1)

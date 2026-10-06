@@ -59,7 +59,8 @@ def _collect_reference_matches(
 
     for (warp_hw, cert_hw), maskB_np, nbr_id, imB_np in zip(batch_results, packed.nn_masks, packed.nn_ids, packed.nn_arrays):
         _raise_if_cancelled(cancel_requested)
-        cert_hw = torch.clamp(cert_hw, min=config.certainty_thresh)
+        if not config.no_filter:
+            cert_hw = torch.where(cert_hw >= config.certainty_thresh, cert_hw, 0.0)
 
         output_hw = (int(warp_hw.shape[0]), int(warp_hw.shape[1]))
         cert_hw_shape = (int(cert_hw.shape[0]), int(cert_hw.shape[1]))
