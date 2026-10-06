@@ -108,6 +108,18 @@ class PanelStructureTests(unittest.TestCase):
                 panel._update_scrub_spec('nns_per_ref', max_value=2)
                 panel._set_scrub_field_value('nns_per_ref', 9)
                 self.assertEqual(panel.config.nns_per_ref, 2)
+                self.assertIs(type(panel.config.nns_per_ref), int)
+                for attr, lower, upper in [('nns_per_ref', 1.0, 2.0),
+                                           ('min_track_length', 2.0, 10.0)]:
+                    for value, expected in [(-100, int(lower)), (100, int(upper)),
+                                             (lower, int(lower))]:
+                        panel._set_int_config(attr, value, lower, upper)
+                        self.assertEqual(getattr(panel.config, attr), expected)
+                        self.assertIs(type(getattr(panel.config, attr)), int)
+                        self.assertEqual(len(list(range(getattr(panel.config, attr)))), expected)
+                    setattr(panel.config, attr, upper)
+                    panel._set_int_config(attr, upper, lower, upper)
+                    self.assertIs(type(getattr(panel.config, attr)), int)
                 panel._set_scrub_field_value('reproj_thresh', 'invalid')
                 self.assertEqual(panel.config.reproj_thresh, 0.8)
                 panel.config.roi_only_selected = True

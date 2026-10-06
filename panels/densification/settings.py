@@ -161,10 +161,10 @@ class DensificationSettings:
 
     def _set_int_config(self, attr, value, vmin, vmax):
         try:
-            v = max(vmin, min(vmax, int(float(value))))
+            v = int(max(vmin, min(vmax, int(float(value)))))
         except (TypeError, ValueError):
             return
-        if v == getattr(self.config, attr):
+        if v == getattr(self.config, attr) and type(getattr(self.config, attr)) is int:
             return
         setattr(self.config, attr, v)
         self._dirty(attr)
