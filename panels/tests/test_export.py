@@ -130,3 +130,37 @@ class ExportTests(unittest.TestCase):
         self.assertFalse(job.result.success)
         complete.assert_not_called()
         write.assert_not_called()
+
+    def test_postprocessing_reuses_observations_and_keeps_alignment(self):
+        xyz, rgb, err, tracks = self.adapter._apply_track_filter(
+            self.raw.xyz, self.raw.rgb, self.raw.err, self.raw.tracks, 2,
+        )
+        self.assertIs(tracks[0], self.raw.tracks[1])
+        self.assertIs(tracks[1], self.raw.tracks[2])
+        np.testing.assert_array_equal(err, [.2, .3])
+        no_op = self.adapter._apply_track_filter(xyz, rgb, err, tracks, 1)
+        for original, returned in zip((xyz, rgb, err, tracks), no_op):
+            self.assertIs(original, returned)
+        no_cap = self.adapter._apply_point_cap(xyz, rgb, err, tracks, 0, 0)
+        self.assertIs(no_cap[3], tracks)
+        capped = self.adapter._apply_point_cap(xyz, rgb, err, tracks, 1, 0)
+        np.testing.assert_array_equal(capped[0], self.raw.xyz[2:])
+        np.testing.assert_array_equal(capped[1], self.raw.rgb[2:])
+        np.testing.assert_array_equal(capped[2], self.raw.err[2:])
+        self.assertIs(capped[3][0], self.raw.tracks[2])
+        self.assertEqual([len(track) for track in self.raw.tracks], [1, 2, 2])
+
+    def test_distance_filter_preserves_track_then_error_priority(self):
+        xyz = np.array([[.1, 0., 0.], [.2, 0., 0.], [.3, 0., 0.], [1.1, 0., 0.]])
+        rgb = np.arange(12).reshape(4, 3)
+        tracks = [[(1, 0., 0.)], [(1, 0., 0.), (2, 0., 0.)],
+                  [(1, 0., 0.), (2, 0., 0.)], [(1, 0., 0.)]]
+        err = np.array([.01, .3, .2, .4])
+        points, colors, errors, kept = self.adapter._voxel_select_track_preserving(
+            xyz, rgb, err, tracks, 1.0,
+        )
+        np.testing.assert_array_equal(points, xyz[[2, 3]])
+        np.testing.assert_array_equal(colors, rgb[[2, 3]])
+        np.testing.assert_array_equal(errors, err[[2, 3]])
+        self.assertIs(kept[0], tracks[2])
+        self.assertIs(kept[1], tracks[3])

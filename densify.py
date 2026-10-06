@@ -71,9 +71,9 @@ def _voxel_select_track_preserving(
     err: np.ndarray,
     tracks: Sequence[Sequence[Tuple[int, float, float]]],
     voxel_size: float,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[List[Tuple[int, float, float]]]]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Sequence[Sequence[Tuple[int, float, float]]]]:
     if voxel_size <= 0.0 or xyz.shape[0] == 0:
-        return xyz, rgb, err, [list(t) for t in tracks]
+        return xyz, rgb, err, tracks
 
     voxels = np.floor(xyz / float(voxel_size)).astype(np.int64)
     chosen: Dict[Tuple[int, int, int], int] = {}
@@ -89,7 +89,7 @@ def _voxel_select_track_preserving(
             chosen[key] = idx
 
     sel = np.asarray(sorted(chosen.values()), dtype=np.int64)
-    return xyz[sel], rgb[sel], err[sel], [list(tracks[i]) for i in sel]
+    return xyz[sel], rgb[sel], err[sel], [tracks[i] for i in sel]
 
 
 
@@ -161,12 +161,12 @@ def _apply_point_cap(
     tracks: Optional[Sequence[Sequence[Tuple[int, float, float]]]],
     max_points: int,
     seed: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[List[List[Tuple[int, float, float]]]]]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[Sequence[Sequence[Tuple[int, float, float]]]]]:
     if max_points > 0 and xyz.shape[0] > max_points:
         sel = np.random.default_rng(seed).choice(xyz.shape[0], size=max_points, replace=False)
-        capped_tracks = None if tracks is None else [list(tracks[i]) for i in sel]
+        capped_tracks = None if tracks is None else [tracks[i] for i in sel]
         return xyz[sel], rgb[sel], err[sel], capped_tracks
-    return xyz, rgb, err, None if tracks is None else [list(t) for t in tracks]
+    return xyz, rgb, err, tracks
 
 
 def _apply_track_filter(
@@ -175,12 +175,16 @@ def _apply_track_filter(
     err: np.ndarray,
     tracks: Sequence[Sequence[Tuple[int, float, float]]],
     min_track_length: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[List[Tuple[int, float, float]]]]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Sequence[Sequence[Tuple[int, float, float]]]]:
+    """Select points without cloning their read-only observation lists."""
     min_track = max(0, int(min_track_length))
     if min_track <= 0:
-        return xyz, rgb, err, [list(t) for t in tracks]
-    keep = np.asarray([len(track) >= min_track for track in tracks], dtype=bool)
-    return xyz[keep], rgb[keep], err[keep], [list(track) for track, ok in zip(tracks, keep) if ok]
+        return xyz, rgb, err, tracks
+    lengths = np.fromiter(map(len, tracks), dtype=np.int32, count=len(tracks))
+    keep = lengths >= min_track
+    if keep.all():
+        return xyz, rgb, err, tracks
+    return xyz[keep], rgb[keep], err[keep], [track for track, ok in zip(tracks, keep) if ok]
 
 
 def _log_track_filter_stats(
@@ -817,7 +821,9 @@ def dense_init_from_lfs(
     if _cancel_requested(cancel_requested):
         return 2, "Cancelled"
 
-    tracks_before = [list(track) for track in result.tracks]
+    if progress_callback:
+        progress_callback(91.0, "Filtering dense tracks...")
+    tracks_before = result.tracks
     xyz, rgb, err, tracks = _apply_track_filter(
         result.xyz,
         result.rgb,
