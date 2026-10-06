@@ -68,7 +68,7 @@ def main() -> int:
         records, refs, neighbors, config,
         progress_callback=lambda pct, message: print(f"{pct:5.1f}% {message}", flush=True),
     )
-    keep = np.flatnonzero(np.asarray([len(track) >= config.min_track_length for track in result.tracks]))
+    keep = np.flatnonzero(result.tracks.lengths >= config.min_track_length)
     if config.max_points > 0 and len(keep) > config.max_points:
         keep = np.random.default_rng(config.seed).choice(keep, size=config.max_points, replace=False)
     if not len(keep):
@@ -77,7 +77,7 @@ def main() -> int:
     write_ply(str(output_path), result.xyz[keep], to_uint8_rgb(result.rgb[keep]))
     metrics_started = time.perf_counter()
     reprojection = compute_reprojection_metrics(
-        result.xyz[keep], [result.tracks[index] for index in keep], records, config.reproj_thresh,
+        result.xyz[keep], result.tracks.select(keep), records, config.reproj_thresh,
     )
     metrics_seconds = time.perf_counter() - metrics_started
     report_path = output_path.with_suffix(".metrics.json")

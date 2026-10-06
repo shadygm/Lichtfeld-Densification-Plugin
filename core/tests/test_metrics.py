@@ -6,6 +6,7 @@ import pycolmap
 
 from core.cameras.models import CameraRecord
 from core.reconstruction.metrics import compute_reprojection_metrics
+from core.reconstruction.tracks import ObservationTracks
 
 
 def camera(model=None):
@@ -18,7 +19,8 @@ def camera(model=None):
 class MetricsTests(unittest.TestCase):
     def test_known_residuals_and_observation_weighting(self):
         xyz = np.array([[0, 0, 1], [0, 0, 1]], dtype=np.float32)
-        result = compute_reprojection_metrics(xyz, [[(1, 0, 0), (1, 3, 4)], [(1, 0, 0)]], [camera()], 4)
+        tracks = ObservationTracks.from_rows([[(1, 0, 0), (1, 3, 4)], [(1, 0, 0)]])
+        result = compute_reprojection_metrics(xyz, tracks, [camera()], 4)
         self.assertAlmostEqual(result['observations']['mean'], 5 / 3)
         self.assertAlmostEqual(result['observations']['rmse'], np.sqrt(25 / 3))
         self.assertEqual(result['observations']['median'], 0)
@@ -46,6 +48,11 @@ class MetricsTests(unittest.TestCase):
             compute_reprojection_metrics(np.zeros((1, 3)), [], [camera()], 1)
         with self.assertRaises(ValueError):
             compute_reprojection_metrics(np.zeros((1, 3)), [[(2, 0, 0)]], [camera()], 1)
+
+    def test_lengths_only_tracks_cannot_silently_produce_empty_metrics(self):
+        with self.assertRaisesRegex(ValueError, 'lengths only'):
+            compute_reprojection_metrics(np.zeros((1, 3)),
+                                         ObservationTracks(np.array([2], np.uint32)), [camera()], 1)
 
 
 if __name__ == '__main__':

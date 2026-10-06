@@ -4,12 +4,13 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional
 import numpy as np
 import torch
 from ..cameras.models import CameraRecord
 from .config import DensePipelineConfig
 from ..images.io import apply_mask_to_rgb, load_mask_resized_np, load_rgb_resized
+from ..reconstruction.tracks import ObservationTracks
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,7 @@ class PipelineResult:
     xyz: np.ndarray
     rgb: np.ndarray
     err: np.ndarray
-    tracks: List[List[Tuple[int, float, float]]]
+    tracks: ObservationTracks
     elapsed_seconds: float
     pairs_processed: int
 
@@ -95,6 +96,7 @@ class _TriangulationContext:
     matcher_sample_cap: float
     w_match: int
     h_match: int
+    retain_observations: bool = True
 
 
 @dataclass
@@ -102,7 +104,7 @@ class _TriangulatedReference:
     xyz: np.ndarray
     rgb: np.ndarray
     err: np.ndarray
-    tracks: List[List[Tuple[int, float, float]]]
+    tracks: ObservationTracks
     debug_matches_by_nbr: Dict[int, np.ndarray]
     debug_cert_by_nbr: Dict[int, np.ndarray]
 
@@ -112,7 +114,7 @@ class _PipelineAccumulator:
     xyz_parts: List[np.ndarray] = field(default_factory=list)
     rgb_parts: List[np.ndarray] = field(default_factory=list)
     err_parts: List[np.ndarray] = field(default_factory=list)
-    track_parts: List[List[List[Tuple[int, float, float]]]] = field(default_factory=list)
+    track_parts: List[ObservationTracks] = field(default_factory=list)
     pairs_processed: int = 0
     pair_counter: int = 0
 

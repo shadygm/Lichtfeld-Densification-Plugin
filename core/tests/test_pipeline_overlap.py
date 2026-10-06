@@ -13,6 +13,7 @@ from core.pipeline.config import DensePipelineConfig
 from core.pipeline import PipelineCancelled, run_dense_pipeline
 from core.pipeline.types import _TriangulatedReference
 from core.previews.files import TemporaryCloudPreviews
+from core.reconstruction.tracks import ObservationTracks
 
 
 class PipelineOverlapTests(unittest.TestCase):
@@ -73,7 +74,7 @@ class PipelineOverlapTests(unittest.TestCase):
             uid = matched.packed.ref_id
             return _TriangulatedReference(
                 np.full((1, 3), uid, dtype=np.float32), np.zeros((1, 3)),
-                np.zeros(1), [[(uid, 0., 0.)]], {}, {},
+                np.zeros(1), ObservationTracks.from_rows([[(uid, 0., 0.)]]), {}, {},
             )
 
         def preview(points, **kwargs):

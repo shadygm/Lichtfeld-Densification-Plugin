@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from ..matching.device import get_device
 from ..reconstruction.cloud import DenseCloud
+from ..reconstruction.tracks import ObservationTracks
 from ..cameras.models import CameraRecord
 from .config import DensePipelineConfig
 from ..cameras.geometry import camera_model_name
@@ -51,6 +52,7 @@ def run_dense_pipeline(
     debug_state: Optional[MatchDebugState] = None,
     cancel_requested: Optional[Callable[[], bool]] = None,
     on_cloud_preview: Optional[Callable[[DenseCloud], None]] = None,
+    retain_observations: bool = True,
 ) -> PipelineResult:
     np.random.seed(config.seed)
 
@@ -121,6 +123,7 @@ def run_dense_pipeline(
             matcher_sample_cap=matcher.sample_thresh,
             w_match=w_match,
             h_match=h_match,
+            retain_observations=retain_observations,
         )
 
         pack_loader = _build_pack_loader(refs_local, pack_ctx, config, cancel_requested)
@@ -223,7 +226,7 @@ def run_dense_pipeline(
     xyz = np.concatenate(points.xyz_parts, axis=0)
     rgb = np.concatenate(points.rgb_parts, axis=0)
     err = np.concatenate(points.err_parts, axis=0)
-    tracks = [track for track_part in points.track_parts for track in track_part]
+    tracks = ObservationTracks.concatenate(points.track_parts)
     elapsed = time.time() - t0
 
     return PipelineResult(

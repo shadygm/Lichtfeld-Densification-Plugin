@@ -58,8 +58,9 @@ class ExportTests(unittest.TestCase):
             xyz=np.array([[1., 0., 5.], [2., 0., 5.], [3., 0., 5.]], dtype=np.float64),
             rgb=np.array([[0., 0., 0.], [.5, 0., 1.], [1., 1., 1.]]),
             err=np.array([.1, .2, .3]),
-            tracks=[[(1, 0., 0.)], [(1, 1., 1.), (2, 2., 2.)],
-                    [(1, 3., 3.), (2, 4., 4.)]],
+            tracks=self.adapter.ObservationTracks.from_rows([
+                [(1, 0., 0.)], [(1, 1., 1.), (2, 2., 2.)], [(1, 3., 3.), (2, 4., 4.)],
+            ]),
         )
         self.enterContext(patch.object(self.adapter, 'extract_cameras_from_lfs', return_value=self.records))
         self.run_pipeline = Mock(return_value=self.raw)
@@ -70,6 +71,7 @@ class ExportTests(unittest.TestCase):
         with patch.object(self.adapter, 'write_sparse_model_bin') as write:
             code, cloud = self.adapter.dense_init_from_lfs([], self.config, progress)
         self.assertEqual(code, 0)
+        self.assertFalse(self.run_pipeline.call_args.kwargs['retain_observations'])
         write.assert_not_called()
         self.assertFalse(self.output.exists())
         self.assertIsNone(cloud.output_path)
@@ -91,6 +93,7 @@ class ExportTests(unittest.TestCase):
         code, exported = self.adapter.dense_init_from_lfs([], self.config, write_colmap=True)
         self.assertEqual(code, 0)
         self.assertEqual(exported.output_path, str(self.output))
+        self.assertTrue(self.run_pipeline.call_args.kwargs['retain_observations'])
         self.assertEqual({path.name for path in self.output.iterdir()},
                          {'cameras.bin', 'images.bin', 'points3D.bin'})
         xyz, rgb, lengths = self.writers.read_points3D_bin_point_cloud(str(self.output / 'points3D.bin'))
@@ -144,8 +147,8 @@ class ExportTests(unittest.TestCase):
         xyz, rgb, err, tracks = self.adapter._apply_track_filter(
             self.raw.xyz, self.raw.rgb, self.raw.err, self.raw.tracks, 2,
         )
-        self.assertIs(tracks[0], self.raw.tracks[1])
-        self.assertIs(tracks[1], self.raw.tracks[2])
+        np.testing.assert_array_equal(tracks.camera_ids, self.raw.tracks.camera_ids[1:])
+        np.testing.assert_array_equal(tracks.pixels, self.raw.tracks.pixels[1:])
         np.testing.assert_array_equal(err, [.2, .3])
         no_op = self.adapter._apply_track_filter(xyz, rgb, err, tracks, 1)
         for original, returned in zip((xyz, rgb, err, tracks), no_op):
@@ -156,8 +159,8 @@ class ExportTests(unittest.TestCase):
         np.testing.assert_array_equal(capped[0], self.raw.xyz[2:])
         np.testing.assert_array_equal(capped[1], self.raw.rgb[2:])
         np.testing.assert_array_equal(capped[2], self.raw.err[2:])
-        self.assertIs(capped[3][0], self.raw.tracks[2])
-        self.assertEqual([len(track) for track in self.raw.tracks], [1, 2, 2])
+        np.testing.assert_array_equal(capped[3].pixels, self.raw.tracks.pixels[-2:])
+        np.testing.assert_array_equal(self.raw.tracks.lengths, [1, 2, 2])
 
     def test_allocator_cleanup_runs_on_worker_after_success_error_and_cancel(self):
         for outcome in ('success', 'error', 'cancel'):
@@ -193,5 +196,21 @@ class ExportTests(unittest.TestCase):
         np.testing.assert_array_equal(points, xyz[[2, 3]])
         np.testing.assert_array_equal(colors, rgb[[2, 3]])
         np.testing.assert_array_equal(errors, err[[2, 3]])
-        self.assertIs(kept[0], tracks[2])
-        self.assertIs(kept[1], tracks[3])
+        expected = self.adapter.ObservationTracks.from_rows([tracks[2], tracks[3]])
+        np.testing.assert_array_equal(kept.lengths, expected.lengths)
+        np.testing.assert_array_equal(kept.camera_ids, expected.camera_ids)
+        np.testing.assert_array_equal(kept.pixels, expected.pixels)
+
+    def test_lengths_only_ui_tracks_preserve_filter_cap_and_voxel_priority(self):
+        tracks = self.adapter.ObservationTracks(np.array([1, 2, 2], np.uint32))
+        self.raw.tracks = tracks
+        self.config.max_points = 1
+        code, cloud = self.adapter.dense_init_from_lfs([], self.config)
+        self.assertEqual(code, 0)
+        np.testing.assert_array_equal(cloud.points, self.raw.xyz[2:])
+        selected = self.adapter._voxel_select_track_preserving(
+            self.raw.xyz, self.raw.rgb, self.raw.err, tracks, 100.,
+        )
+        np.testing.assert_array_equal(selected[0], self.raw.xyz[1:2])
+        np.testing.assert_array_equal(selected[3].lengths, [2])
+        self.assertFalse(selected[3].has_observations)

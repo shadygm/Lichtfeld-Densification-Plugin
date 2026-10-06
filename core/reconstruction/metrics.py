@@ -1,14 +1,13 @@
 """Reprojection metrics for final points and their recorded image observations."""
 from __future__ import annotations
 
-from collections import defaultdict
 from typing import Sequence
 
 import numpy as np
 
 from ..cameras.models import CameraRecord
 from ..cameras.geometry import reprojection_errors, reprojection_errors_camera
-from .writers import TrackObservation
+from .tracks import ObservationTracks, observation_tracks
 
 
 def _summarize(errors: np.ndarray, threshold: float) -> dict:
@@ -32,7 +31,7 @@ def _summarize(errors: np.ndarray, threshold: float) -> dict:
 
 def compute_reprojection_metrics(
     xyz: np.ndarray,
-    tracks: Sequence[Sequence[TrackObservation]],
+    tracks: ObservationTracks,
     cameras: Sequence[CameraRecord],
     threshold_px: float,
 ) -> dict:
@@ -41,37 +40,36 @@ def compute_reprojection_metrics(
     Statistics exclude invalid projections; their counts and threshold failures
     are reported separately. Pixels use each camera's original resolution.
     """
+    tracks = observation_tracks(tracks)
     if len(xyz) != len(tracks):
         raise ValueError('Each point must have exactly one observation track')
+    tracks.require_observations()
     by_id = {camera.uid: camera for camera in cameras}
-    observations = defaultdict(list)
-    for point_index, track in enumerate(tracks):
-        for camera_id, x, y in track:
-            if camera_id not in by_id:
-                raise ValueError(f'Unknown camera ID in track: {camera_id}')
-            observations[camera_id].append((point_index, x, y))
+    point_indices = tracks.point_indices()
 
     errors_by_camera = []
     point_max = np.full(len(xyz), np.nan, dtype=np.float64)
-    for camera_id, rows in observations.items():
-        rows = np.asarray(rows, dtype=np.float64)
-        indices = rows[:, 0].astype(np.int64)
+    for camera_id, observations in tracks.camera_groups():
+        if camera_id not in by_id:
+            raise ValueError(f'Unknown camera ID in track: {camera_id}')
+        indices = point_indices[observations]
+        pixels = tracks.pixels[observations]
         points = xyz[indices]
         camera = by_id[camera_id]
         if camera.colmap_camera is not None:
             errors, valid = reprojection_errors_camera(
-                camera.colmap_camera, camera.R, camera.t, points, rows[:, 1:],
+                camera.colmap_camera, camera.R, camera.t, points, pixels,
             )
         else:
             homogeneous = np.column_stack((points, np.ones(len(points))))
-            errors = reprojection_errors(camera.P, homogeneous, rows[:, 1:])
+            errors = reprojection_errors(camera.P, homogeneous, pixels)
             valid = np.isfinite(points).all(axis=1) & ((homogeneous @ camera.P.T)[:, 2] > 0)
         errors = np.where(valid & np.isfinite(errors), errors, np.inf).astype(np.float64)
         errors_by_camera.append(errors)
         # fmax ignores the initial NaN, preserving NaN for points with no observations.
         np.fmax.at(point_max, indices, errors)
     errors = np.concatenate(errors_by_camera) if errors_by_camera else np.empty(0)
-    lengths = np.asarray([len(track) for track in tracks], dtype=np.int64)
+    lengths = tracks.lengths
     return dict(
         units='original_camera_pixels', threshold_px=float(threshold_px),
         observations=_summarize(errors, threshold_px),

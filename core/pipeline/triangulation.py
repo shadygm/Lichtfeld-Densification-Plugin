@@ -19,6 +19,7 @@ from ..cameras.geometry import (
 )
 from ..matching.sampling import select_samples_with_coverage
 from .types import _MatchedReference, _TriangulatedReference, _TriangulationContext
+from ..reconstruction.tracks import ObservationTrackBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -241,7 +242,8 @@ def _triangulate_ref(
     active = np.flatnonzero(valid)
     if not len(active):
         return None
-    tracks = [[(int(ref_id), float(uvA_full[index, 0]), float(uvA_full[index, 1]))] for index in active]
+    tracks = ObservationTrackBuilder(len(active), len(nn_ids) + 1, tri_ctx.retain_observations)
+    tracks.append(np.arange(len(active)), ref_id, uvA_full[active])
     errors = np.where(np.isfinite(ref_errors), ref_errors, 0.0)
     has_error = np.isfinite(ref_errors)
     debug_matches_by_nbr = {}
@@ -266,8 +268,7 @@ def _triangulate_ref(
         errors[supported] = np.maximum(errors[supported], np.maximum(support[finite], candidate_err[kidx, supported]))
         has_error[supported] = True
         positions = np.searchsorted(active, indices)
-        for position, (x, y) in zip(positions, candidate_uv[kidx, indices]):
-            tracks[position].append((int(nbr_id), float(x), float(y)))
+        tracks.append(positions, nbr_id, candidate_uv[kidx, indices])
         if collect_debug_matches and len(indices):
             xB = (selected_warps[kidx, indices, 2] + 1.0) * 0.5 * (w_match - 1)
             yB = (selected_warps[kidx, indices, 3] + 1.0) * 0.5 * (h_match - 1)
@@ -286,6 +287,6 @@ def _triangulate_ref(
     errors = np.where(has_error, errors, candidate_err.max(axis=0))
     return _TriangulatedReference(
         xyz=xyz[active], rgb=rgb_ref[active].astype(np.float32), err=errors[active].astype(np.float32),
-        tracks=tracks, debug_matches_by_nbr=debug_matches_by_nbr,
+        tracks=tracks.finish(), debug_matches_by_nbr=debug_matches_by_nbr,
         debug_cert_by_nbr=debug_cert_by_nbr,
     )

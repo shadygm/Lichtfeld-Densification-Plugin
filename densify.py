@@ -23,6 +23,7 @@ if str(_THIS_DIR) not in sys.path:
 from .core.cameras.models import CameraRecord
 from .core.pipeline.config import DensePipelineConfig
 from .core.reconstruction.cloud import DenseCloud
+from .core.reconstruction.tracks import ObservationTracks, observation_tracks
 from .core.cameras.geometry import K_from_camera, P_from_KRt, cam_center_world, pose_world2cam
 from .core.images.io import find_image, image_dir, to_uint8_rgb
 from .core.cameras.selection import (
@@ -69,9 +70,10 @@ def _voxel_select_track_preserving(
     xyz: np.ndarray,
     rgb: np.ndarray,
     err: np.ndarray,
-    tracks: Sequence[Sequence[Tuple[int, float, float]]],
+    tracks: ObservationTracks,
     voxel_size: float,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Sequence[Sequence[Tuple[int, float, float]]]]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, ObservationTracks]:
+    tracks = observation_tracks(tracks)
     if voxel_size <= 0.0 or xyz.shape[0] == 0:
         return xyz, rgb, err, tracks
 
@@ -83,13 +85,13 @@ def _voxel_select_track_preserving(
         if prev is None:
             chosen[key] = idx
             continue
-        track_len = len(tracks[idx])
-        prev_track_len = len(tracks[prev])
+        track_len = tracks.lengths[idx]
+        prev_track_len = tracks.lengths[prev]
         if track_len > prev_track_len or (track_len == prev_track_len and float(err[idx]) < float(err[prev])):
             chosen[key] = idx
 
     sel = np.asarray(sorted(chosen.values()), dtype=np.int64)
-    return xyz[sel], rgb[sel], err[sel], [tracks[i] for i in sel]
+    return xyz[sel], rgb[sel], err[sel], tracks.select(sel)
 
 
 
@@ -158,13 +160,13 @@ def _apply_point_cap(
     xyz: np.ndarray,
     rgb: np.ndarray,
     err: np.ndarray,
-    tracks: Optional[Sequence[Sequence[Tuple[int, float, float]]]],
+    tracks: Optional[ObservationTracks],
     max_points: int,
     seed: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[Sequence[Sequence[Tuple[int, float, float]]]]]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[ObservationTracks]]:
     if max_points > 0 and xyz.shape[0] > max_points:
         sel = np.random.default_rng(seed).choice(xyz.shape[0], size=max_points, replace=False)
-        capped_tracks = None if tracks is None else [tracks[i] for i in sel]
+        capped_tracks = None if tracks is None else observation_tracks(tracks).select(sel)
         return xyz[sel], rgb[sel], err[sel], capped_tracks
     return xyz, rgb, err, tracks
 
@@ -173,31 +175,31 @@ def _apply_track_filter(
     xyz: np.ndarray,
     rgb: np.ndarray,
     err: np.ndarray,
-    tracks: Sequence[Sequence[Tuple[int, float, float]]],
+    tracks: ObservationTracks,
     min_track_length: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Sequence[Sequence[Tuple[int, float, float]]]]:
-    """Select points without cloning their read-only observation lists."""
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, ObservationTracks]:
+    """Select aligned numeric tracks without creating observation rows."""
+    tracks = observation_tracks(tracks)
     min_track = max(0, int(min_track_length))
     if min_track <= 0:
         return xyz, rgb, err, tracks
-    lengths = np.fromiter(map(len, tracks), dtype=np.int32, count=len(tracks))
-    keep = lengths >= min_track
+    keep = tracks.lengths >= min_track
     if keep.all():
         return xyz, rgb, err, tracks
-    return xyz[keep], rgb[keep], err[keep], [track for track, ok in zip(tracks, keep) if ok]
+    return xyz[keep], rgb[keep], err[keep], tracks.select(keep)
 
 
 def _log_track_filter_stats(
     label: str,
-    tracks_before: Sequence[Sequence[Tuple[int, float, float]]],
-    tracks_after: Sequence[Sequence[Tuple[int, float, float]]],
+    tracks_before: ObservationTracks,
+    tracks_after: ObservationTracks,
     min_track_length: int,
 ) -> None:
     before = len(tracks_before)
     after = len(tracks_after)
     kept_pct = 100.0 if before == 0 else (float(after) / float(before)) * 100.0
-    before_lengths = np.asarray([len(track) for track in tracks_before], dtype=np.int32)
-    after_lengths = np.asarray([len(track) for track in tracks_after], dtype=np.int32)
+    before_lengths = observation_tracks(tracks_before).lengths
+    after_lengths = observation_tracks(tracks_after).lengths
 
     def fmt(lengths: np.ndarray) -> str:
         if lengths.size == 0:
@@ -564,7 +566,7 @@ def _run_dense_pipeline_chunked(
                 "Completed chunks remain available for --resume_chunks."
             ) from exc
 
-        tracks_before = [list(track) for track in result.tracks]
+        tracks_before = result.tracks
         xyz, rgb, err, tracks = _apply_track_filter(
             result.xyz,
             result.rgb,
@@ -710,7 +712,7 @@ def dense_init(
 
     tracks = getattr(result, "tracks", None)
     if tracks is not None:
-        tracks_before = [list(track) for track in tracks]
+        tracks_before = tracks
         xyz, rgb, err, tracks = _apply_track_filter(
             result.xyz,
             result.rgb,
@@ -813,6 +815,7 @@ def dense_init_from_lfs(
             progress_callback=progress_callback,
             on_sequential_viz=on_sequential_viz,
             on_cloud_preview=on_cloud_preview,
+            retain_observations=write_colmap,
             debug_state=debug_state,
             cancel_requested=cancel_requested,
         )

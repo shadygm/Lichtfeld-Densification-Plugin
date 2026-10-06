@@ -3,19 +3,29 @@ from __future__ import annotations
 
 import os
 import struct
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from ..cameras.models import CameraRecord
+from .tracks import ObservationTracks, observation_tracks as numeric_tracks
 
 
 def ensure_dir(path: str) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 
 
-TrackObservation = Tuple[int, float, float]
+_IMAGE_POINT_DTYPE = np.dtype([("x", "<f8"), ("y", "<f8"), ("point_id", "<i8")])
+_TRACK_INDEX_DTYPE = np.dtype([("image_id", "<i4"), ("point2d_index", "<i4")])
+
+
+@dataclass
+class _IndexedTracks:
+    lengths: np.ndarray
+    offsets: np.ndarray
+    entries: np.ndarray
 
 
 def _rotation_matrix_to_qvec(R: np.ndarray) -> np.ndarray:
@@ -80,10 +90,13 @@ def write_images_bin(
             f.write(struct.pack("<i", camera_id))
             name = os.path.basename(record.image_path or f"{image_id}.png")
             f.write(name.encode("utf-8") + b"\x00")
-            points2d = list(image_points2d.get(image_id, ()))
+            points2d = image_points2d.get(image_id, ())
             f.write(struct.pack("<Q", len(points2d)))
-            for x, y, point3d_id in points2d:
-                f.write(struct.pack("<ddq", float(x), float(y), int(point3d_id)))
+            if isinstance(points2d, np.ndarray) and points2d.dtype == _IMAGE_POINT_DTYPE:
+                points2d.tofile(f)
+            else:
+                for x, y, point3d_id in points2d:
+                    f.write(struct.pack("<ddq", float(x), float(y), int(point3d_id)))
 
 
 def write_points3D_bin(
@@ -91,13 +104,11 @@ def write_points3D_bin(
     xyz: np.ndarray,
     rgb_uint8: np.ndarray,
     errors: Optional[np.ndarray] = None,
-    tracks: Optional[Sequence[Sequence[Tuple[int, int]]]] = None,
+    tracks: Optional[Sequence[Sequence[Tuple[int, int]]] | _IndexedTracks] = None,
 ) -> None:
     N = xyz.shape[0]
     if errors is None:
         errors = np.zeros((N,), dtype=np.float32)
-    if tracks is None:
-        tracks = [()] * N
     ensure_dir(path_out)
     with open(path_out, "wb") as f:
         f.write(struct.pack("<Q", N))
@@ -106,10 +117,42 @@ def write_points3D_bin(
             f.write(struct.pack("<ddd", float(xyz[i, 0]), float(xyz[i, 1]), float(xyz[i, 2])))
             f.write(struct.pack("<BBB", int(rgb_uint8[i, 0]), int(rgb_uint8[i, 1]), int(rgb_uint8[i, 2])))
             f.write(struct.pack("<d", float(errors[i])))
-            track = list(tracks[i])
-            f.write(struct.pack("<Q", len(track)))
-            for image_id, point2d_idx in track:
-                f.write(struct.pack("<ii", int(image_id), int(point2d_idx)))
+            if isinstance(tracks, _IndexedTracks):
+                f.write(struct.pack("<Q", int(tracks.lengths[i])))
+                f.write(tracks.entries[tracks.offsets[i]:tracks.offsets[i + 1]].tobytes())
+            else:
+                track = tracks[i] if tracks is not None else ()
+                f.write(struct.pack("<Q", len(track)))
+                for image_id, point2d_idx in track:
+                    f.write(struct.pack("<ii", int(image_id), int(point2d_idx)))
+
+
+def _index_observations(tracks: ObservationTracks, camera_records):
+    """Build COLMAP's per-image rows and per-point indices in numeric buffers."""
+    tracks.require_observations()
+    point_indices = tracks.point_indices()
+    known = np.isin(tracks.camera_ids, [record.uid for record in camera_records])
+    selected = np.flatnonzero(known)
+    points, images = point_indices[selected], tracks.camera_ids[selected]
+    if len(selected):
+        # Keep the first observation of each image in each point's track.
+        order = np.lexsort((images, points))
+        first = np.r_[True, (points[order][1:] != points[order][:-1])
+                      | (images[order][1:] != images[order][:-1])]
+        selected = selected[np.sort(order[first])]
+    points = point_indices[selected]
+    indexed = ObservationTracks(np.bincount(points, minlength=len(tracks)).astype(np.uint32),
+                                 tracks.camera_ids[selected], tracks.pixels[selected])
+    pairs = np.empty(len(selected), dtype=_TRACK_INDEX_DTYPE)
+    image_points2d = {}
+    for camera_id, observations in indexed.camera_groups():
+        rows = np.empty(len(observations), dtype=_IMAGE_POINT_DTYPE)
+        rows["x"], rows["y"] = indexed.pixels[observations].T
+        rows["point_id"] = points[observations] + 1
+        image_points2d[camera_id] = rows
+        pairs["image_id"][observations] = camera_id
+        pairs["point2d_index"][observations] = np.arange(len(observations))
+    return image_points2d, _IndexedTracks(indexed.lengths, indexed.offsets, pairs)
 
 
 def write_sparse_model_bin(
@@ -118,27 +161,14 @@ def write_sparse_model_bin(
     xyz: np.ndarray,
     rgb_uint8: np.ndarray,
     errors: Optional[np.ndarray],
-    observation_tracks: Sequence[Sequence[TrackObservation]],
+    observation_tracks: ObservationTracks,
 ) -> None:
     Path(sparse_dir).mkdir(parents=True, exist_ok=True)
-    image_points2d: Dict[int, List[Tuple[float, float, int]]] = {
-        int(record.uid): [] for record in camera_records
-    }
-    indexed_tracks: List[List[Tuple[int, int]]] = []
-
-    for point_idx, observations in enumerate(observation_tracks):
-        point3d_id = point_idx + 1
-        indexed_track: List[Tuple[int, int]] = []
-        seen_images = set()
-        for image_id_raw, x, y in observations:
-            image_id = int(image_id_raw)
-            if image_id in seen_images or image_id not in image_points2d:
-                continue
-            seen_images.add(image_id)
-            point2d_idx = len(image_points2d[image_id])
-            image_points2d[image_id].append((float(x), float(y), point3d_id))
-            indexed_track.append((image_id, point2d_idx))
-        indexed_tracks.append(indexed_track)
+    # Accept legacy rows at this boundary without rebuilding them internally.
+    tracks = numeric_tracks(observation_tracks)
+    if len(tracks) != len(xyz):
+        raise ValueError("Each exported point must have one observation track")
+    image_points2d, indexed_tracks = _index_observations(tracks, camera_records)
 
     write_cameras_bin(os.path.join(sparse_dir, "cameras.bin"), camera_records)
     write_images_bin(os.path.join(sparse_dir, "images.bin"), camera_records, image_points2d)
