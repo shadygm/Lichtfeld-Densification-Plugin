@@ -2,9 +2,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 import torch
 from einops import rearrange
-from romav2.normalizers import imagenet
-from romav2.types import Normalizer, DescriptorName
-from romav2.device import device
+from .normalizers import imagenet
+from .types import Normalizer, DescriptorName
+from .device import device
 from torch import nn
 from functools import partial
 import torchvision.models as models

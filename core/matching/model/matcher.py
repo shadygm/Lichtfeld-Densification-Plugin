@@ -2,12 +2,12 @@ import torch
 import torch.nn as nn
 from dataclasses import dataclass
 from typing import Literal
-from romav2.geometry import get_normalized_grid
+from .geometry import get_normalized_grid
 from einops import einsum
-from romav2.device import device
-from romav2.vit import ViTModel, vit_from_name
-from romav2.types import HeadType, MatcherStyle
-from romav2.dpt import DPTHead
+from .device import device
+from .transformer import ViTModel, vit_from_name
+from .types import HeadType, MatcherStyle
+from .heads.dpt import DPTHead
 
 
 def normalize(x: torch.Tensor, dim: int):

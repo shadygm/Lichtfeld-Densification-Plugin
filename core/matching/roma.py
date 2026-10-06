@@ -4,8 +4,6 @@ from __future__ import annotations
 from collections import OrderedDict
 
 import os
-import sys
-from pathlib import Path
 from typing import Dict, List, Tuple
 
 import logging
@@ -13,12 +11,6 @@ import torch
 from PIL import Image
 
 logger = logging.getLogger(__name__)
-
-_ROOT = Path(__file__).resolve().parents[2]
-_ROMA_SRC = _ROOT / "RoMaV2" / "src"
-if str(_ROMA_SRC) not in sys.path:
-    sys.path.insert(0, str(_ROMA_SRC))
-
 
 _ROMA_WEIGHTS_FILE = "romav2.pt"
 
@@ -97,7 +89,7 @@ class RomaMatcher:
     """Wrapper around RoMaV2 for dense matching."""
 
     def __init__(self, device: str = "cuda", mode: str = "outdoor", setting: str = "fast"):
-        from romav2 import RoMaV2
+        from .model import RoMaV2
 
         del mode  # Legacy arg kept for API compatibility.
         self.device = torch.device(device)

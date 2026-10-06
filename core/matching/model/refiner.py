@@ -5,11 +5,11 @@ from dataclasses import dataclass
 from typing import Literal
 import torch
 import torch.nn as nn
-from romav2.local_correlation import local_correlation
-from romav2.geometry import get_normalized_grid
-from romav2.device import device
-from romav2.geometry import bhwc_grid_sample
-from romav2.types import RefinersType, NormType
+from .local_correlation import local_correlation
+from .geometry import get_normalized_grid
+from .device import device
+from .geometry import bhwc_grid_sample
+from .types import RefinersType, NormType
 
 
 def create_block(
