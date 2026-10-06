@@ -90,7 +90,7 @@ class DensificationWorkflow:
             if point_cloud is None:
                 lf.log.error(f"Node '{target.name}' has no point cloud data")
                 return False
-            return self._apply_dense_point_cloud(scene, target, point_cloud, cloud.points, cloud.colors)
+            return self._apply_dense_point_cloud(target, point_cloud, cloud.points, cloud.colors)
         except Exception as exc:
             lf.log.error(f"Failed to import dense point cloud: {exc}")
             return False
@@ -123,12 +123,11 @@ class DensificationWorkflow:
         self._active_run_roi_only_selected = None
         self.last_result = DensifyResult(success=False, error=str(error))
 
-    def _apply_dense_point_cloud(self, scene, target, point_cloud, points, colors) -> bool:
+    def _apply_dense_point_cloud(self, target, point_cloud, points, colors) -> bool:
         if self._run_roi_only_selected():
             points, colors = self._build_roi_merge_arrays(points, colors)
         self._set_point_cloud_data(point_cloud, points, colors)
         lf.log.debug(f"Updated '{target.name}' with {int(points.shape[0]):,} points")
-        scene.notify_changed()
         self._preview_override_active = True
         if not self._is_running() and not self._pending_import:
             self._active_run_roi_only_selected = None
@@ -160,7 +159,7 @@ class DensificationWorkflow:
                 lf.log.error(f"Node '{target.name}' has no point cloud data")
                 return False
 
-            return self._apply_dense_point_cloud(scene, target, point_cloud, dense_points, dense_colors)
+            return self._apply_dense_point_cloud(target, point_cloud, dense_points, dense_colors)
 
         except Exception as e:
             lf.log.error(f"Failed to import PLY: {e}")

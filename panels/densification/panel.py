@@ -127,14 +127,15 @@ class DensificationPanel(DensificationBindings, DensificationSettings, Densifica
                 pass
 
     @staticmethod
-    def _to_lf_tensor(value, *, copy: bool = True):
+    def _to_lf_tensor(value):
         if isinstance(value, lf.Tensor):
-            return value.clone() if copy else value
-        return lf.Tensor.from_numpy(np.asarray(value), copy=copy)
+            return value
+        return lf.Tensor.from_numpy(np.ascontiguousarray(value), copy=True)
 
     @staticmethod
     def _set_point_cloud_data(point_cloud, points, colors):
+        # set_data owns its GPU copies and notifies the scene itself.
         point_cloud.set_data(
-            DensificationPanel._to_lf_tensor(points, copy=True),
-            DensificationPanel._to_lf_tensor(colors, copy=True),
+            DensificationPanel._to_lf_tensor(points),
+            DensificationPanel._to_lf_tensor(colors),
         )

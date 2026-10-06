@@ -137,7 +137,7 @@ class PanelStructureTests(unittest.TestCase):
                 np.testing.assert_array_equal(imported_points[:10], points)
                 np.testing.assert_array_equal(imported_colors[:10], colors)
                 self.assertEqual(len(imported_points), 17)
-                scene.notify_changed.assert_called_once()
+                scene.notify_changed.assert_not_called()
                 self.assertIsNone(result.cloud)
                 self.assertIsNone(panel._pending_import)
                 self.assertEqual(result.num_points, 17)

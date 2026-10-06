@@ -97,20 +97,22 @@ class DensificationScene:
         return bool(self.config.roi_only_selected)
 
     @staticmethod
-    def _coerce_point_cloud_array(value, field_name: str) -> np.ndarray:
-        arr = np.asarray(value.numpy(copy=True) if isinstance(value, lf.Tensor) else value)
+    def _coerce_point_cloud_array(value, field_name: str, *, copy: bool = True) -> np.ndarray:
+        native = isinstance(value, lf.Tensor)
+        arr = np.asarray(value.numpy(copy=copy) if native else value)
         if arr.ndim != 2:
             raise RuntimeError(
                 f"Point cloud field '{field_name}' must be 2D, got shape {arr.shape!r}"
             )
-        return np.array(arr, copy=True)
+        # Native numpy(copy=True) already owns an independent snapshot.
+        return np.array(arr, copy=True) if copy and not native else arr
 
     def _build_roi_merge_arrays(self, dense_points, dense_colors):
         if self._base_point_cloud_points is None or self._base_point_cloud_colors is None:
             raise RuntimeError("ROI merge snapshot is missing.")
 
-        dense_points_np = self._coerce_point_cloud_array(dense_points, "dense_points")
-        dense_colors_np = self._coerce_point_cloud_array(dense_colors, "dense_colors")
+        dense_points_np = self._coerce_point_cloud_array(dense_points, "dense_points", copy=False)
+        dense_colors_np = self._coerce_point_cloud_array(dense_colors, "dense_colors", copy=False)
         merged_points_np = np.concatenate((dense_points_np, self._base_point_cloud_points), axis=0)
         merged_colors_np = np.concatenate((dense_colors_np, self._base_point_cloud_colors), axis=0)
         return merged_points_np, merged_colors_np
@@ -183,7 +185,6 @@ class DensificationScene:
             self._set_point_cloud_data(
                 point_cloud, self._base_point_cloud_points, self._base_point_cloud_colors,
             )
-            scene.notify_changed()
             self._preview_override_active = False
         except Exception as exc:
             lf.log.warn(f"Failed to restore original point cloud: {exc}")
