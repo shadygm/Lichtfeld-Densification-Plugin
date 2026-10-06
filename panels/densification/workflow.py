@@ -125,6 +125,8 @@ class DensificationWorkflow:
             self._pending_start_training = False
 
     def _on_error(self, error: Exception):
+        if self._cancel_requested:
+            return
         # Worker callback: keep scene changes and snapshot cleanup on the UI thread.
         self._pending_error = str(error)
         lf.log.error(f"Densification failed: {error}")

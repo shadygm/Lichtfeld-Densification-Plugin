@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2025 Shady Gmira
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Submit immutable cloud inputs and poll publication on the scene thread."""
+from __future__ import annotations
+
 from dataclasses import dataclass
 import os
 
@@ -12,7 +14,7 @@ from .job import DensifyResult, DensifyStage
 
 @dataclass
 class _CloudUpdate:
-    ticket: object
+    ticket: lf.scene.PointCloudUpdateTicket
     node_uuid: str
     kind: str
     result: DensifyResult | None = None

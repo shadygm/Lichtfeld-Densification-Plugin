@@ -177,7 +177,71 @@ class AsyncTransferTests(AsyncPanelTestCase):
         self.panel._on_complete(result)
         self.assertIsNone(result.cloud)
         self.assertIsNone(self.panel._pending_import)
+        self.panel._on_error(RuntimeError('late worker error'))
+        self.assertIsNone(self.panel._pending_error)
         self.host.start_training.assert_not_called()
+
+    def test_submission_error_restores_previous_preview_asynchronously(self):
+        self.panel._apply_dense_point_cloud(self.scene.node, self.scene.node.point_cloud(),
+                                            np.ones((3, 3), np.float32), np.zeros((3, 3), np.uint8))
+        self.panel._cloud_update.ticket.publish()
+        self.panel.on_update(None)
+        cloud = self.scene.node.point_cloud()
+        submit = cloud.set_data_async
+        attempts = []
+
+        def limited_submit(*args, **kwargs):
+            attempts.append(args)
+            if len(attempts) == 1:
+                raise RuntimeError('Queue memory limit')
+            return submit(*args, **kwargs)
+
+        result = self.result()
+        self.panel._start_training_when_complete = True
+        self.panel._on_complete(result)
+        with patch.object(cloud, 'set_data_async', side_effect=limited_submit):
+            self.panel.on_update(None)
+        self.assertIsNone(result.cloud)
+        self.assertEqual(self.panel.last_result.error, 'Queue memory limit')
+        self.assertEqual(self.panel._cloud_update.kind, 'restore')
+        self.assertEqual(len(attempts), 2)
+        self.panel._cloud_update.ticket.publish()
+        self.panel.on_update(None)
+        np.testing.assert_array_equal(self.scene.node.point_cloud().means.array, np.zeros((2, 3)))
+        self.host.start_training.assert_not_called()
+
+    def test_cancel_after_publication_before_poll_restores_original_cloud(self):
+        _, final = self.submit_final(train=True)
+        final.publish()
+        self.panel._on_do_cancel(None, None, None)
+        self.panel.on_update(None)
+        self.assertEqual(final.state, 'published')
+        self.assertEqual(self.panel.last_result.error, 'Cancelled')
+        self.assertEqual(self.panel._cloud_update.kind, 'restore')
+        self.panel._cloud_update.ticket.publish()
+        self.panel.on_update(None)
+        self.host.start_training.assert_not_called()
+        np.testing.assert_array_equal(self.scene.node.point_cloud().means.array, np.zeros((2, 3)))
+
+    def test_failed_preview_cancels_worker_without_rolling_back_external_changes(self):
+        self.panel.job = SimpleNamespace(stage=self.module.DensifyStage.MATCHING,
+                                         is_running=lambda: False, cancel=Mock())
+        cloud = self.scene.node.point_cloud()
+        self.panel._apply_dense_point_cloud(self.scene.node, cloud,
+                                            np.ones((3, 3), np.float32), np.zeros((3, 3), np.uint8))
+        self.panel._cloud_update.ticket.state = 'superseded'
+        self.panel.on_update(None)
+        self.panel.job.cancel.assert_called_once()
+        self.assertIn('superseded', self.panel.last_result.error)
+        self.assertFalse(self.panel._preview_override_active)
+        self.assertIsNone(self.panel._cloud_update)
+        self.assertEqual(len(cloud.submissions), 1)
+
+    def test_new_job_cannot_start_while_publication_is_pending(self):
+        self.submit_final()
+        with patch.object(self.panel, '_has_training_data') as has_cameras:
+            self.panel._start()
+        has_cameras.assert_not_called()
 
     def test_empty_cloud_publishes(self):
         result = self.result(np.empty((0, 3), np.float32), np.empty((0, 3), np.uint8))
