@@ -112,6 +112,10 @@ class RomaMatcher:
             self.model.bidirectional = True
         else:
             self.model.apply_setting(setting)
+        descriptor_config = self.model.cfg.descriptor
+        if descriptor_config.name == "dinov3_vitl16" and all(index > 0 for index in descriptor_config.layer_idx):
+            # Intermediate features precede the unused tail of the transformer.
+            self.model.f.blocks = self.model.f.blocks[:max(descriptor_config.layer_idx) + 1]
         self.model.to(self.device)
         self.model.eval()
         lr_pixels = self.model.H_lr * self.model.W_lr

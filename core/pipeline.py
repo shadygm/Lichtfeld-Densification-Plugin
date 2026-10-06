@@ -930,6 +930,7 @@ def run_dense_pipeline(
         if torch.cuda.is_available():
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
+            # Fast runs spend more time searching kernels than the search saves.
             torch.backends.cudnn.benchmark = config.roma_setting != "fast"
         matcher = RomaMatcher(device=device, mode="outdoor", setting=config.roma_setting)
         if not model_cached and progress_callback is not None:
