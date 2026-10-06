@@ -808,7 +808,16 @@ def _triangulate_ref(
         camera = cameras.by_id[camera_id]
         if camera_id in cameras.distorted_ids:
             return reprojection_errors_camera(camera.colmap_camera, camera.R, camera.t, points, observations)[0]
-        return reprojection_errors(camera.P, points, observations)
+        errors = reprojection_errors(camera.P, points, observations)
+        if not config.no_filter:
+            # GEMM and per-point GEMV round differently. Preserve the original
+            # acceptance decision for observations near the filtering boundary.
+            boundary = np.flatnonzero(np.abs(errors - config.reproj_thresh) < 0.002)
+            for index in boundary:
+                errors[index] = reprojection_errors(
+                    camera.P, points[index:index + 1], observations[index:index + 1],
+                )[0]
+        return errors
 
     ref_errors = support_errors(ref_id, homogeneous, uvA_full)
     valid = candidate_valid.any(axis=0)
