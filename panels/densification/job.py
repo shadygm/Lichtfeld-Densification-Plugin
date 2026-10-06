@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Background densification jobs, progress and cancellation."""
 
-import os
-import struct
 import threading
 import time
 import weakref
@@ -12,6 +10,7 @@ from enum import Enum
 from typing import Callable, Optional, List, ClassVar
 import lichtfeld as lf
 from ...core.pipeline.config import DensePipelineConfig
+from ...core.reconstruction.cloud import DenseCloud
 from ...core.previews.matches import MatchDebugState
 
 
@@ -22,6 +21,7 @@ class DensifyStage(Enum):
     LOADING = "Loading"
     MATCHING = "Matching"
     TRIANGULATING = "Triangulating"
+    FINALIZING = "Finalizing"
     WRITING = "Writing"
     DONE = "Done"
     ERROR = "Error"
@@ -37,6 +37,7 @@ class DensifyResult:
     num_points: int = 0
     elapsed_time: float = 0.0
     error: Optional[str] = None
+    cloud: Optional[DenseCloud] = None
 
 
 class DensifyJob:
@@ -56,6 +57,7 @@ class DensifyJob:
         on_error: Optional[Callable[[Exception], None]] = None,
         on_sequential_viz: Optional[Callable[[str], None]] = None,
         debug_state: Optional[MatchDebugState] = None,
+        write_colmap: bool = False,
     ):
         self.config = config
         self.camera_nodes = list(camera_nodes) if camera_nodes is not None else None
@@ -64,6 +66,7 @@ class DensifyJob:
         self.on_error = on_error
         self.on_sequential_viz = on_sequential_viz
         self.debug_state = debug_state
+        self.write_colmap = write_colmap
 
         self._stage = DensifyStage.IDLE
         self._progress = 0.0
@@ -122,6 +125,7 @@ class DensifyJob:
             DensifyStage.LOADING,
             DensifyStage.MATCHING,
             DensifyStage.TRIANGULATING,
+            DensifyStage.FINALIZING,
             DensifyStage.WRITING,
         )
 
@@ -191,7 +195,7 @@ class DensifyJob:
                 
                 stage = DensifyStage.MATCHING
                 if pct >= 95.0:
-                    stage = DensifyStage.WRITING
+                    stage = DensifyStage.WRITING if self.write_colmap else DensifyStage.FINALIZING
                 elif pct >= 90.0 or "triangula" in msg.lower():
                     stage = DensifyStage.TRIANGULATING
                 
@@ -205,6 +209,7 @@ class DensifyJob:
                 on_sequential_viz=self.on_sequential_viz,
                 debug_state=self.debug_state,
                 cancel_requested=check_cancelled,
+                write_colmap=self.write_colmap,
             )
 
             if result_code == 2 or check_cancelled():
@@ -217,20 +222,14 @@ class DensifyJob:
                 raise RuntimeError(result_info or "Densification failed")
 
             elapsed = time.time() - t0
-            output_path = result_info  # On success, this is the output path
-
-            # Count points from the output sparse model.
-            num_points = 0
-            points3d_path = os.path.join(output_path, "points3D.bin") if output_path else ""
-            if points3d_path and os.path.exists(points3d_path):
-                with open(points3d_path, "rb") as output:
-                    num_points = struct.unpack("<Q", output.read(8))[0]
+            num_points = len(result_info.points)
 
             result = DensifyResult(
                 success=True,
-                output_path=output_path,
+                output_path=result_info.output_path,
                 num_points=num_points,
                 elapsed_time=elapsed,
+                cloud=result_info,
             )
 
             with self._lock:

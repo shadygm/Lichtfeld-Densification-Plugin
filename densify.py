@@ -22,6 +22,7 @@ if str(_THIS_DIR) not in sys.path:
 
 from .core.cameras.models import CameraRecord
 from .core.pipeline.config import DensePipelineConfig
+from .core.reconstruction.cloud import DenseCloud
 from .core.cameras.geometry import K_from_camera, P_from_KRt, cam_center_world, pose_world2cam
 from .core.images.io import find_image, image_dir, to_uint8_rgb
 from .core.cameras.selection import (
@@ -768,7 +769,8 @@ def dense_init_from_lfs(
     on_sequential_viz: Optional[Callable[[str], None]] = None,
     debug_state=None,
     cancel_requested: Optional[Callable[[], bool]] = None,
-) -> Tuple[int, Optional[str]]:
+    write_colmap: bool = False,
+) -> Tuple[int, str | DenseCloud]:
     np.random.seed(config.seed)
     if progress_callback:
         progress_callback(2.0, "Extracting camera data from scene...")
@@ -823,7 +825,7 @@ def dense_init_from_lfs(
         result.tracks,
         config.min_track_length,
     )
-    _log_track_filter_stats("COLMAP track filter", tracks_before, tracks, config.min_track_length)
+    _log_track_filter_stats("Dense track filter", tracks_before, tracks, config.min_track_length)
     if xyz.shape[0] == 0:
         return 1, "No points remain after track-length filtering."
 
@@ -836,13 +838,20 @@ def dense_init_from_lfs(
         xyz, rgb, err, tracks = _voxel_select_track_preserving(xyz, rgb, err, tracks, config.voxel_size)
         lf.log.info(f"Distance filter ({config.voxel_size:.4f}): {xyz.shape[0]:,} points remaining")
 
-    if progress_callback:
-        progress_callback(95.0, "Writing COLMAP sparse output...")
-    write_sparse_model_bin(config.output_path, records, xyz, to_uint8_rgb(rgb), err, tracks)
-    lf.log.info(f"Dense sparse model saved to {config.output_path} ({xyz.shape[0]:,} points)")
+    if _cancel_requested(cancel_requested):
+        return 2, "Cancelled"
+    cloud = DenseCloud(xyz.astype(np.float32, copy=False), to_uint8_rgb(rgb))
+    if write_colmap:
+        if progress_callback:
+            progress_callback(95.0, "Writing COLMAP sparse output...")
+        write_sparse_model_bin(config.output_path, records, xyz, cloud.colors, err, tracks)
+        cloud.output_path = config.output_path
+        lf.log.info(f"Dense sparse model saved to {config.output_path} ({xyz.shape[0]:,} points)")
+    elif progress_callback:
+        progress_callback(95.0, "Preparing point cloud for scene...")
     if progress_callback:
         progress_callback(100.0, f"Done! {xyz.shape[0]:,} points")
-    return 0, config.output_path
+    return 0, cloud
 
 
 def build_argparser():

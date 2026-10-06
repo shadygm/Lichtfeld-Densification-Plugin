@@ -67,6 +67,7 @@ class DensificationPanel(DensificationBindings, DensificationSettings, Densifica
         self._pending_import = None
         self._pending_start_training = False
         self._auto_import = True
+        self._write_colmap = False
         self._start_training_when_complete = False
 
         self.debug_state = None

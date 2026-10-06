@@ -141,6 +141,12 @@
         <input type="range" class="setting-slider" data-value="viz_interval" min="0" max="10" step="1" />
         <span class="slider-value">{{viz_interval}}</span>
       </div>
+      <div class="setting-row" title="Also write cameras, observations and points to a COLMAP model in the LichtFeld cache. Disabled by default; the viewport receives the cloud directly.">
+        <label class="setting-label">
+          <input type="checkbox" data-checked="write_colmap" />
+          <span>Write COLMAP Output</span>
+        </label>
+      </div>
       <div class="setting-row">
         <label class="setting-label">
           <input type="checkbox" data-checked="start_training_when_complete" />

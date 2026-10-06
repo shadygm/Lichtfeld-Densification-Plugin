@@ -54,6 +54,7 @@ class DensificationBindings:
         model.bind("start_training_when_complete",
                     lambda: self._start_training_when_complete,
                     self._set_start_training_when_complete)
+        model.bind("write_colmap", lambda: self._write_colmap, self._set_write_colmap)
 
         # --- Number-input config values ---
         model.bind("matches_per_ref_str",
@@ -111,12 +112,12 @@ class DensificationBindings:
     def on_update(self, doc):
         # Handle pending import on main thread
         if self._pending_import:
-            path = self._pending_import
+            output = self._pending_import
             start_training = self._pending_start_training
             self._pending_import = None
             self._pending_start_training = False
-            lf.log.info(f"Loading dense point cloud: {path}")
-            imported = self._import_output(path)
+            lf.log.info("Loading dense point cloud")
+            imported = self._import_output(output)
             if imported and start_training:
                 self._start_training_after_import()
 

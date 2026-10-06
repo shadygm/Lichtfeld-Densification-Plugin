@@ -173,6 +173,10 @@ class DensificationSettings:
         self._start_training_when_complete = bool(value)
         self._dirty("start_training_when_complete")
 
+    def _set_write_colmap(self, value):
+        self._write_colmap = bool(value)
+        self._dirty("write_colmap")
+
     def _set_distance_filter_enabled(self, value):
         enabled = bool(value)
         if enabled:

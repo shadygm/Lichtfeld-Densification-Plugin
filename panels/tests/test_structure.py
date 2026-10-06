@@ -30,6 +30,9 @@ class PanelStructureTests(unittest.TestCase):
             def set_spec(self, prop, spec):
                 self.specs[prop] = spec
 
+            def sync_all(self):
+                return False
+
         class Model:
             def __init__(self):
                 self.bindings = {}
@@ -52,7 +55,7 @@ class PanelStructureTests(unittest.TestCase):
                 Panel=object, PanelSpace=SimpleNamespace(MAIN_PANEL_TAB=1),
                 PanelHeightMode=SimpleNamespace(CONTENT=1),
             ),
-            log=Mock(), get_scene=lambda: None,
+            log=Mock(), get_scene=lambda: None, Tensor=type('Tensor', (), {}),
         )
         sdk = SimpleNamespace(ScrubFieldSpec=ScrubSpec, ScrubFieldController=ScrubController)
         root = Path(__file__).parents[2]
@@ -75,6 +78,20 @@ class PanelStructureTests(unittest.TestCase):
                 model = Model()
                 panel.on_bind_model(SimpleNamespace(create_data_model=lambda _: model))
                 self.assertEqual(model.bindings['num_refs'][0](), '0.80')
+                self.assertFalse(model.bindings['write_colmap'][0]())
+                self.assertIn('data-checked="write_colmap"', Path(panel.template).read_text())
+                model.bindings['write_colmap'][1](True)
+                self.assertTrue(panel._write_colmap)
+                with patch.object(panel, '_has_training_data', return_value=True), patch.object(
+                    panel, '_get_effective_camera_nodes', return_value=[object(), object()],
+                ), patch.object(panel, '_capture_base_point_cloud', return_value=True), patch(
+                    'panel_structure_plugin.panels.densification.workflow.DensifyJob',
+                ) as job:
+                    panel._start()
+                    self.assertTrue(job.call_args.kwargs['write_colmap'])
+                    job.return_value.start.assert_called_once()
+                panel.job = None
+                panel._active_run_roi_only_selected = None
                 self.assertEqual(set(model.events), {'do_start', 'do_cancel', 'toggle_section', 'num_step'})
                 model.bindings['matches_per_ref_str'][1]('30000')
                 self.assertEqual(panel.config.matches_per_ref, 30000)
@@ -95,9 +112,39 @@ class PanelStructureTests(unittest.TestCase):
                 self.assertEqual(panel.config.reproj_thresh, 0.8)
                 panel.config.roi_only_selected = True
                 panel._base_point_cloud_points = np.zeros((7, 3))
+                panel._base_point_cloud_colors = np.zeros((7, 3), dtype=np.uint8)
                 panel._start_training_when_complete = True
-                result = module.DensifyResult(True, '/tmp/dense/sparse/0', 10)
+                cloud_module = importlib.import_module('panel_structure_plugin.core.reconstruction.cloud')
+                points = np.arange(30, dtype=np.float32).reshape(10, 3)
+                colors = np.full((10, 3), 128, dtype=np.uint8)
+                result = module.DensifyResult(True, num_points=10,
+                                            cloud=cloud_module.DenseCloud(points, colors))
                 panel._on_complete(result)
                 self.assertEqual(result.num_points, 17)
-                self.assertEqual(panel._pending_import, result.output_path)
+                self.assertIs(panel._pending_import, result)
                 self.assertTrue(panel._pending_start_training)
+                scene = Mock()
+                target = SimpleNamespace(name='cloud', point_cloud=lambda: object())
+                operations = Mock()
+                with patch.object(host, 'get_scene', return_value=scene), patch.object(
+                    panel, '_resolve_target_point_cloud_node', return_value=target,
+                ), patch.object(panel, '_set_point_cloud_data', operations.set_data), patch.object(
+                    panel, '_start_training_after_import', operations.start_training,
+                ):
+                    panel.on_update(None)
+                self.assertEqual([call[0] for call in operations.mock_calls], ['set_data', 'start_training'])
+                imported_points, imported_colors = operations.set_data.call_args.args[1:]
+                np.testing.assert_array_equal(imported_points[:10], points)
+                np.testing.assert_array_equal(imported_colors[:10], colors)
+                self.assertEqual(len(imported_points), 17)
+                scene.notify_changed.assert_called_once()
+                self.assertIsNone(result.cloud)
+                self.assertIsNone(panel._pending_import)
+                self.assertEqual(result.num_points, 17)
+                failed_import = module.DensifyResult(True, num_points=10,
+                                                   cloud=cloud_module.DenseCloud(points, colors))
+                panel._on_complete(failed_import)
+                with patch.object(panel, '_start_training_after_import') as start_training:
+                    panel.on_update(None)  # Host has no scene: importing fails.
+                start_training.assert_not_called()
+                self.assertIsNone(failed_import.cloud)
