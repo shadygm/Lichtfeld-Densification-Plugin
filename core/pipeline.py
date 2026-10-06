@@ -397,7 +397,9 @@ def _collect_reference_matches(
     pair_index_by_nbr: Dict[int, int] = {}
     image_by_nbr: Dict[int, np.ndarray] = {}
 
-    batch_results = matcher.match_grids_batch(imA, nn_images)
+    batch_results = matcher.match_grids_batch(
+        imA, nn_images, reference_key=packed.ref_id, neighbor_keys=packed.nn_ids
+    )
     _raise_if_cancelled(cancel_requested)
 
     maskA_cache: Dict[Tuple[int, int], torch.Tensor] = {}

@@ -1,6 +1,8 @@
 """RoMaV2 matcher wrapper."""
 from __future__ import annotations
 
+from collections import OrderedDict
+
 import gc
 import os
 import sys
@@ -9,7 +11,6 @@ from typing import Dict, List, Tuple
 
 import logging
 import torch
-import torch.nn.functional as F
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,28 @@ def has_cached_romav2_weights() -> bool:
     return any(os.path.isfile(path) for path in romav2_cached_weights_paths())
 
 
+class _CachedFeatures(torch.nn.Module):
+    """Bounded inference cache for features of retained, immutable image tensors."""
+
+    def __init__(self, module, capacity=24):
+        super().__init__()
+        self.module = module
+        self.capacity = capacity
+        self.cache = OrderedDict()
+
+    def forward(self, image):
+        key = id(image)
+        cached = self.cache.get(key)
+        if cached is not None and cached[0] is image:
+            self.cache.move_to_end(key)
+            return cached[1]
+        features = self.module(image)
+        self.cache[key] = (image, features)
+        if len(self.cache) > self.capacity:
+            self.cache.popitem(last=False)
+        return features
+
+
 class RomaMatcher:
     """Wrapper around RoMaV2 for dense matching."""
 
@@ -91,6 +114,15 @@ class RomaMatcher:
             self.model.apply_setting(setting)
         self.model.to(self.device)
         self.model.eval()
+        lr_pixels = self.model.H_lr * self.model.W_lr
+        hr_pixels = (self.model.H_hr or 0) * (self.model.W_hr or 0)
+        # Scale entry limits with resolution so high-detail modes retain less.
+        self._image_capacity = max(2, 256 * 512**2 // (lr_pixels + hr_pixels))
+        self.model.f = _CachedFeatures(self.model.f, max(2, 256 * 512**2 // lr_pixels))
+        self.model.refiner_features = _CachedFeatures(
+            self.model.refiner_features, max(2, 24 * 512**2 // max(lr_pixels, hr_pixels))
+        )
+        self._image_cache = OrderedDict()
         self.sample_thresh = 0.9
         self.w_resized = self.model.W_lr
         self.h_resized = self.model.H_lr
@@ -104,6 +136,9 @@ class RomaMatcher:
         model = getattr(self, "model", None)
         if model is None:
             return
+        self._image_cache.clear()
+        model.f.cache.clear()
+        model.refiner_features.cache.clear()
         try:
             model.to("cpu")
         except Exception:
@@ -138,41 +173,40 @@ class RomaMatcher:
         self._grid_cache[key] = grid
         return grid
 
+    def _prepare_image(self, image, key):
+        if key is not None and key in self._image_cache:
+            self._image_cache.move_to_end(key)
+            return self._image_cache[key]
+        prepared = self.model._resize_match_image(self.model._load_image(image))
+        if key is not None:
+            self._image_cache[key] = prepared
+            if len(self._image_cache) > self._image_capacity:
+                self._image_cache.popitem(last=False)
+        return prepared
+
     @torch.inference_mode()
     def _match_grids_batch_cached_reference(
         self,
         imA: Image.Image,
         imB_list: List[Image.Image],
+        reference_key=None,
+        neighbor_keys=None,
     ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
         model = self.model
         if model is None:
             raise RuntimeError("RoMaV2 model has been released; create a new matcher before matching.")
-        img_A = model._load_image(imA)
-        img_A_lr = F.interpolate(
-            img_A,
-            size=(int(model.H_lr), int(model.W_lr)),
-            mode="bicubic",
-            align_corners=False,
-            antialias=True,
-        )
-        if model.H_hr is not None and model.W_hr is not None:
-            img_A_hr = F.interpolate(
-                img_A,
-                size=(int(model.H_hr), int(model.W_hr)),
-                mode="bicubic",
-                align_corners=False,
-                antialias=True,
-            )
-        else:
-            img_A_hr = None
+        img_A_lr, img_A_hr = self._prepare_image(imA, reference_key)
         f_list_A = model.f(img_A_lr)
         results: List[Tuple[torch.Tensor, torch.Tensor]] = []
 
-        for imB in imB_list:
-            preds = model.match_from_features(
+        keys = neighbor_keys if neighbor_keys is not None else [None] * len(imB_list)
+        for imB, key in zip(imB_list, keys):
+            img_B_lr, img_B_hr = self._prepare_image(imB, key)
+            preds = model._match_core(
                 f_list_A=f_list_A,
                 img_A_lr=img_A_lr,
-                imB=imB,
+                img_B_lr=img_B_lr,
+                img_B_hr=img_B_hr,
                 img_A_hr=img_A_hr,
             )
             warp_AB_hw = preds["warp_AB"][0]
@@ -184,7 +218,7 @@ class RomaMatcher:
             del preds, warp_AB_hw, overlap_AB_hw, warp
 
         del f_list_A
-        del img_A_lr, img_A
+        del img_A_lr
         if img_A_hr is not None:
             del img_A_hr
 
@@ -198,10 +232,16 @@ class RomaMatcher:
         return batch_results[0]
 
     @torch.inference_mode()
-    def match_grids_batch(self, imA: Image.Image, imB_list: List[Image.Image]) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+    def match_grids_batch(
+        self, imA: Image.Image, imB_list: List[Image.Image], *,
+        reference_key=None, neighbor_keys=None,
+    ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+        """Match a batch; optional keys identify immutable images within this job."""
         if self.model is None:
             raise RuntimeError("RoMaV2 model has been released; create a new matcher before matching.")
+        if neighbor_keys is not None and len(neighbor_keys) != len(imB_list):
+            raise ValueError("Each neighbor image must have one cache key.")
         if not imB_list:
             return []
         torch.set_float32_matmul_precision("highest")
-        return self._match_grids_batch_cached_reference(imA, imB_list)
+        return self._match_grids_batch_cached_reference(imA, imB_list, reference_key, neighbor_keys)
