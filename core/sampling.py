@@ -36,18 +36,11 @@ def select_samples_with_coverage(cert_map: torch.Tensor, M: int, cap: float = 0.
     gy = (yy // tile).reshape(-1).numpy()
     bins = gx * 100000 + gy
     order = np.argsort(-weights)
-    seen = set()
-    idx_cov = []
-    for i in order:
-        if weights[i] <= 0:
-            break
-        b = int(bins[i])
-        if b in seen:
-            continue
-        seen.add(b)
-        idx_cov.append(i)
-        if len(idx_cov) >= M - len(idx_main):
-            break
+    # Preserve certainty order while taking the first positive sample per tile.
+    positive_order = order[weights[order] > 0]
+    _, first = np.unique(bins[positive_order], return_index=True)
+    first.sort()
+    idx_cov = positive_order[first[:max(1, M - len(idx_main))]]
 
     sel_idx = np.unique(np.concatenate([idx_main, np.asarray(idx_cov, dtype=np.int64)]))
     return sel_idx

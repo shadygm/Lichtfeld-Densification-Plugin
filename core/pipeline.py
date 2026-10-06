@@ -675,12 +675,11 @@ def _triangulate_ref(
     syA = hA_cam / float(h_match)
     uvA_full = np.stack([xA * sxA, yA * syA], axis=1)
 
-    candidates_by_sample: List[List[Tuple[np.ndarray, float, int, float, float, float, float, float, float, float]]] = [
-        [] for _ in range(sel_idx.shape[0])
-    ]
-    debug_matches_tmp: Dict[int, List[List[float]]] = {}
-    debug_cert_tmp: Dict[int, List[float]] = {}
-    cert_denom = float(matcher_sample_cap) if float(matcher_sample_cap) > 1e-6 else 1.0
+    sample_count = len(sel_idx)
+    candidate_xyz = np.zeros((len(nn_ids), sample_count, 3), dtype=np.float32)
+    candidate_err = np.zeros((len(nn_ids), sample_count), dtype=np.float32)
+    candidate_uv = np.zeros((len(nn_ids), sample_count, 2), dtype=np.float32)
+    candidate_valid = np.zeros((len(nn_ids), sample_count), dtype=bool)
 
     for kidx, nbr_id in enumerate(nn_ids):
         idxs = np.arange(sel_idx.shape[0], dtype=np.int64)
@@ -694,9 +693,6 @@ def _triangulate_ref(
         xB = (xB_norm_k + 1.0) * 0.5 * (w_match - 1)
         yB = (yB_norm_k + 1.0) * 0.5 * (h_match - 1)
         uvB = np.stack([xB * sxB, yB * syB], axis=1)
-        xA_pair = xA
-        yA_pair = yA
-        cert_pair = selected_certs[kidx]
 
         pair_uses_distortion_aware = bool(
             ref_id in cameras.distorted_ids
@@ -720,9 +716,6 @@ def _triangulate_ref(
             xB = xB[good]
             yB = yB[good]
             uvB = uvB[good]
-            xA_pair = xA_pair[good]
-            yA_pair = yA_pair[good]
-            cert_pair = cert_pair[good]
         if idxs.size == 0:
             continue
 
@@ -752,11 +745,8 @@ def _triangulate_ref(
             uvB_used = uvB
             uvA_cam = uvA_cam[valid_uv]
             uvB_cam = uvB_cam[valid_uv]
-            xA_pair = xA_pair[valid_uv]
-            yA_pair = yA_pair[valid_uv]
             xB = xB[valid_uv]
             yB = yB[valid_uv]
-            cert_pair = cert_pair[valid_uv]
 
             Rt1 = Rt_from_Rt(ref_camera.R, ref_camera.t)
             Rt2 = Rt_from_Rt(neighbor.R, neighbor.t)
@@ -800,139 +790,76 @@ def _triangulate_ref(
         Xw = Xi[keep][:, :3].astype(np.float32)
         e = err[keep].astype(np.float32)
         uvB_keep = uvB[keep]
-        xA_keep = np.clip(xA_pair[keep], 0.0, float(w_match - 1))
-        yA_keep = np.clip(yA_pair[keep], 0.0, float(h_match - 1))
-        xB_keep = np.clip(xB[keep], 0.0, float(w_match - 1))
-        yB_keep = np.clip(yB[keep], 0.0, float(h_match - 1))
-        cert_keep = np.clip(cert_pair[keep] / cert_denom, 0.0, 1.0).astype(np.float32, copy=False)
+        candidate_xyz[kidx, kept_idxs] = Xw
+        candidate_err[kidx, kept_idxs] = e
+        candidate_uv[kidx, kept_idxs] = uvB_keep
+        candidate_valid[kidx, kept_idxs] = True
 
-        for local_idx, point, point_err, xa_m, ya_m, xb_m, yb_m, uvb, cert_norm in zip(
-            kept_idxs,
-            Xw,
-            e,
-            xA_keep,
-            yA_keep,
-            xB_keep,
-            yB_keep,
-            uvB_keep,
-            cert_keep,
-        ):
-            candidates_by_sample[int(local_idx)].append(
-                (
-                    point,
-                    float(point_err),
-                    int(nbr_id),
-                    float(uvb[0]),
-                    float(uvb[1]),
-                    float(xa_m),
-                    float(ya_m),
-                    float(xb_m),
-                    float(yb_m),
-                    float(cert_norm),
-                )
-            )
+    # Fuse the same inverse-error-weighted pair estimates, then validate support
+    # in camera-sized batches instead of making tiny NumPy calls for every point.
+    weights = np.where(candidate_valid, 1.0 / np.maximum(candidate_err, 1.0e-4), 0.0)
+    xyz = (candidate_xyz * weights[..., None]).sum(axis=0) / np.maximum(weights.sum(axis=0), 1.0e-8)[:, None]
+    homogeneous = np.column_stack((xyz, np.ones(sample_count, dtype=np.float32)))
 
-    out_xyz: List[np.ndarray] = []
-    out_rgb: List[np.ndarray] = []
-    out_err: List[float] = []
-    out_tracks: List[List[Tuple[int, float, float]]] = []
+    def support_errors(camera_id, points, observations):
+        camera = cameras.by_id[camera_id]
+        if camera_id in cameras.distorted_ids:
+            return reprojection_errors_camera(camera.colmap_camera, camera.R, camera.t, points, observations)[0]
+        return reprojection_errors(camera.P, points, observations)
 
-    def support_reprojection_error(image_id: int, Xh_point: np.ndarray, uv_obs: np.ndarray) -> float:
-        if image_id in cameras.distorted_ids:
-            cam = cameras.by_id[image_id].colmap_camera
-            if cam is None:
-                return float("inf")
-            err_cam, _valid = reprojection_errors_camera(
-                cam,
-                cameras.by_id[image_id].R,
-                cameras.by_id[image_id].t,
-                Xh_point[None, :],
-                uv_obs[None, :],
-            )
-            return float(err_cam[0])
-        return float(reprojection_errors(cameras.by_id[image_id].P, Xh_point[None, :], uv_obs[None, :])[0])
-
-    for sample_idx, candidates in enumerate(candidates_by_sample):
-        if not candidates:
-            continue
-
-        points_np = np.stack([c[0] for c in candidates], axis=0).astype(np.float32, copy=False)
-        errs_np = np.asarray([c[1] for c in candidates], dtype=np.float32)
-        weights = 1.0 / np.maximum(errs_np, 1.0e-4)
-        Xw = (points_np * weights[:, None]).sum(axis=0) / max(float(weights.sum()), 1.0e-8)
-        Xh = np.concatenate([Xw.astype(np.float32), np.ones((1,), dtype=np.float32)])
-
-        ref_obs = uvA_full[sample_idx]
-        ref_err = support_reprojection_error(ref_id, Xh, ref_obs)
-        if not config.no_filter and (not np.isfinite(ref_err) or ref_err > float(config.reproj_thresh)):
-            continue
-
-        track: List[Tuple[int, float, float]] = [
-            (int(ref_id), float(ref_obs[0]), float(ref_obs[1]))
-        ]
-        support_errs = [float(ref_err)] if np.isfinite(ref_err) else []
-        used_images = {int(ref_id)}
-        debug_for_point: List[Tuple[int, List[float], float]] = []
-
-        for candidate in candidates:
-            (
-                _point,
-                pair_err,
-                nbr_id,
-                uvb_x,
-                uvb_y,
-                xa_match,
-                ya_match,
-                xb_match,
-                yb_match,
-                cert_norm,
-            ) = candidate
-            if nbr_id in used_images:
-                continue
-            nbr_err = support_reprojection_error(
-                nbr_id,
-                Xh,
-                np.asarray([uvb_x, uvb_y], dtype=np.float32),
-            )
-            if not config.no_filter and (not np.isfinite(nbr_err) or nbr_err > float(config.reproj_thresh)):
-                continue
-            used_images.add(nbr_id)
-            track.append((int(nbr_id), float(uvb_x), float(uvb_y)))
-            if np.isfinite(nbr_err):
-                support_errs.append(float(max(nbr_err, pair_err)))
-            debug_for_point.append(
-                (
-                    int(nbr_id),
-                    [float(xa_match), float(ya_match), float(xb_match), float(yb_match)],
-                    float(cert_norm),
-                )
-            )
-
-        out_xyz.append(Xw.astype(np.float32, copy=False))
-        out_rgb.append(rgb_ref[sample_idx].astype(np.float32, copy=False))
-        out_err.append(float(max(support_errs) if support_errs else np.nan_to_num(errs_np).max()))
-        out_tracks.append(track)
-        if collect_debug_matches:
-            for nbr_id, match, cert_norm in debug_for_point:
-                debug_matches_tmp.setdefault(nbr_id, []).append(match)
-                debug_cert_tmp.setdefault(nbr_id, []).append(cert_norm)
-
-    if not out_xyz:
+    ref_errors = support_errors(ref_id, homogeneous, uvA_full)
+    valid = candidate_valid.any(axis=0)
+    if not config.no_filter:
+        valid &= np.isfinite(ref_errors) & (ref_errors <= config.reproj_thresh)
+    active = np.flatnonzero(valid)
+    if not len(active):
         return None
+    tracks = [[(int(ref_id), float(uvA_full[index, 0]), float(uvA_full[index, 1]))] for index in active]
+    errors = np.where(np.isfinite(ref_errors), ref_errors, 0.0)
+    has_error = np.isfinite(ref_errors)
+    debug_matches_by_nbr = {}
+    debug_cert_by_nbr = {}
+    accepted_by_id = {ref_id: np.ones(sample_count, dtype=bool)}
+    cert_denom = float(matcher_sample_cap) if matcher_sample_cap > 1.0e-6 else 1.0
 
-    debug_matches_by_nbr: Dict[int, np.ndarray] = {}
-    debug_cert_by_nbr: Dict[int, np.ndarray] = {}
-    if collect_debug_matches:
-        for nbr_id, matches in debug_matches_tmp.items():
-            debug_matches_by_nbr[nbr_id] = np.asarray(matches, dtype=np.float32).reshape((-1, 4))
-            debug_cert_by_nbr[nbr_id] = np.asarray(debug_cert_tmp.get(nbr_id, ()), dtype=np.float32)
+    for kidx, nbr_id in enumerate(nn_ids):
+        indices = np.flatnonzero(candidate_valid[kidx] & valid)
+        if not len(indices):
+            continue
+        support = support_errors(nbr_id, homogeneous[indices], candidate_uv[kidx, indices])
+        accepted = np.ones(len(indices), dtype=bool)
+        if not config.no_filter:
+            accepted &= np.isfinite(support) & (support <= config.reproj_thresh)
+        seen = accepted_by_id.setdefault(nbr_id, np.zeros(sample_count, dtype=bool))
+        accepted &= ~seen[indices]
+        indices, support = indices[accepted], support[accepted]
+        seen[indices] = True
+        finite = np.isfinite(support)
+        supported = indices[finite]
+        errors[supported] = np.maximum(errors[supported], np.maximum(support[finite], candidate_err[kidx, supported]))
+        has_error[supported] = True
+        positions = np.searchsorted(active, indices)
+        for position, (x, y) in zip(positions, candidate_uv[kidx, indices]):
+            tracks[position].append((int(nbr_id), float(x), float(y)))
+        if collect_debug_matches and len(indices):
+            xB = (selected_warps[kidx, indices, 2] + 1.0) * 0.5 * (w_match - 1)
+            yB = (selected_warps[kidx, indices, 3] + 1.0) * 0.5 * (h_match - 1)
+            matches = np.column_stack((
+                np.clip(xA[indices], 0, w_match - 1), np.clip(yA[indices], 0, h_match - 1),
+                np.clip(xB, 0, w_match - 1), np.clip(yB, 0, h_match - 1),
+            )).astype(np.float32)
+            certainty = np.clip(selected_certs[kidx, indices] / cert_denom, 0, 1).astype(np.float32)
+            if nbr_id in debug_matches_by_nbr:
+                debug_matches_by_nbr[nbr_id] = np.concatenate((debug_matches_by_nbr[nbr_id], matches))
+                debug_cert_by_nbr[nbr_id] = np.concatenate((debug_cert_by_nbr[nbr_id], certainty))
+            else:
+                debug_matches_by_nbr[nbr_id] = matches
+                debug_cert_by_nbr[nbr_id] = certainty
 
+    errors = np.where(has_error, errors, candidate_err.max(axis=0))
     return _TriangulatedReference(
-        xyz=np.stack(out_xyz, axis=0).astype(np.float32, copy=False),
-        rgb=np.stack(out_rgb, axis=0).astype(np.float32, copy=False),
-        err=np.asarray(out_err, dtype=np.float32),
-        tracks=out_tracks,
-        debug_matches_by_nbr=debug_matches_by_nbr,
+        xyz=xyz[active], rgb=rgb_ref[active].astype(np.float32), err=errors[active].astype(np.float32),
+        tracks=tracks, debug_matches_by_nbr=debug_matches_by_nbr,
         debug_cert_by_nbr=debug_cert_by_nbr,
     )
 
