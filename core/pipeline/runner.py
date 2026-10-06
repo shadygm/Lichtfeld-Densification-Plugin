@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, List, Optional
 import numpy as np
 import torch
+from ..matching.device import get_device
 from ..cameras.models import CameraRecord
 from .config import DensePipelineConfig
 from ..cameras.geometry import camera_model_name
@@ -87,7 +88,7 @@ def run_dense_pipeline(
     try:
         from ..matching.roma import RomaMatcher, has_cached_romav2_weights
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = get_device()
         model_cached = has_cached_romav2_weights()
         _report_model_setup_status(progress_callback, model_cached)
         if torch.cuda.is_available():

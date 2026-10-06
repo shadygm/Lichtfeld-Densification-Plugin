@@ -19,7 +19,10 @@ class PipelineOverlapTests(unittest.TestCase):
     def test_cancellation_waits_for_worker_and_releases_runtime(self):
         self.run_pipeline(cancel=True)
 
-    def run_pipeline(self, cancel):
+    def test_pipeline_passes_mps_to_matcher(self):
+        self.run_pipeline(cancel=False, mps=True)
+
+    def run_pipeline(self, cancel, mps=False):
         cancelled = Event()
         next_match = Event()
         packages = [SimpleNamespace(ref_id=uid) for uid in (1, 2)]
@@ -49,14 +52,16 @@ class PipelineOverlapTests(unittest.TestCase):
             seen.append(points.pairs_processed)
 
         with ExitStack() as stack:
+            mocks = {}
             for target, replacement in {
                 'core.pipeline.runner._build_camera_lookup': SimpleNamespace(img_ids=[1, 2], by_id={}, distorted_ids=set()),
                 'core.pipeline.runner._build_pack_loader': loader,
                 'core.matching.roma.RomaMatcher': matcher,
                 'core.matching.roma.has_cached_romav2_weights': True,
                 'core.pipeline.runner.torch.cuda.is_available': False,
+                'core.pipeline.runner.torch.backends.mps.is_available': mps,
             }.items():
-                stack.enter_context(patch(target, return_value=replacement))
+                mocks[target] = stack.enter_context(patch(target, return_value=replacement))
             stack.enter_context(patch('core.pipeline.runner._collect_reference_matches', side_effect=match))
             stack.enter_context(patch('core.pipeline.runner._triangulate_ref', side_effect=triangulate))
             stack.enter_context(patch('core.pipeline.runner._emit_intermediate_preview', side_effect=preview))
@@ -73,5 +78,7 @@ class PipelineOverlapTests(unittest.TestCase):
                 np.testing.assert_array_equal(result.xyz[:, 0], [1, 2])
                 self.assertEqual(seen, [1, 2])
                 self.assertEqual(result.pairs_processed, 2)
+            self.assertEqual(mocks['core.matching.roma.RomaMatcher'].call_args.kwargs['device'],
+                             'mps' if mps else 'cpu')
         loader.close.assert_called_once_with(wait=True)
         matcher.close.assert_called_once()
