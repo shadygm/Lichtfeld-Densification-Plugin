@@ -29,7 +29,7 @@ def select_samples_with_coverage(cert_map: torch.Tensor, M: int, cap: float = 0.
     weights = (weights / s).numpy()
 
     m_main = int(M * 0.85)
-    idx_main = np.random.choice(weights.size, size=min(m_main, weights.size), replace=False, p=weights)
+    idx_main = np.random.choice(weights.size, size=min(m_main, np.count_nonzero(weights)), replace=False, p=weights)
 
     tile = max(1, W // tiles)
     gx = (xx // tile).reshape(-1).numpy()

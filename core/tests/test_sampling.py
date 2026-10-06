@@ -22,3 +22,10 @@ class SamplingTests(unittest.TestCase):
 
     def test_empty_certainty_has_no_samples(self):
         self.assertEqual(select_samples_with_coverage(torch.zeros(4, 4), 10).size, 0)
+
+    def test_sparse_mask_returns_available_samples_at_30000_limit(self):
+        cert = torch.zeros(512, 512)
+        cert[10:20, 10:20] = .8
+        indices = select_samples_with_coverage(cert, 30000)
+        self.assertEqual(len(indices), 100)
+        self.assertTrue(torch.all(cert.reshape(-1)[indices] > 0))
