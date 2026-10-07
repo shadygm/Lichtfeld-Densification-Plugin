@@ -6,14 +6,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import lichtfeld as lf
-import numpy as np
-
 from .job import DensifyResult, DensifyStage
+from .publishing import CloudUpdateTicket, SynchronousUpdateTicket, select_point_cloud_publisher
 
 
 @dataclass
 class _CloudUpdate:
-    ticket: lf.scene.PointCloudUpdateTicket
+    ticket: CloudUpdateTicket
     node_uuid: str
     kind: str
     result: DensifyResult | None = None
@@ -28,24 +27,26 @@ class DensificationTransfer:
         self._active_run_roi_only_selected = None
         self._preview_override_active = False
 
-    @staticmethod
-    def _set_point_cloud_data(point_cloud, points, colors):
-        # The API retains the input owners; never mutate submitted arrays/tensors.
-        if not isinstance(points, lf.Tensor):
-            points = np.ascontiguousarray(points, dtype=np.float32)
-        if not isinstance(colors, lf.Tensor):
-            colors = np.asarray(colors)
-            colors = np.ascontiguousarray(colors, dtype=np.uint8 if colors.dtype == np.uint8 else np.float32)
-        return point_cloud.set_data_async(points, colors, queue_policy="latest")
+    def _set_point_cloud_data(self, point_cloud, points, colors):
+        # Select once on first publication. Keep no bound native cloud wrapper:
+        # later publications can replace the payload or target another scene.
+        self._set_point_cloud_data = select_point_cloud_publisher(point_cloud)
+        return self._set_point_cloud_data(point_cloud, points, colors)
 
     def _queue_cloud_update(self, target, point_cloud, points, colors, *, kind,
                             result=None, start_training=False):
-        ticket = self._set_point_cloud_data(point_cloud, points, colors)
-        self._cloud_update = _CloudUpdate(ticket, target.uuid, kind, result, start_training)
+        previous = self._cloud_update
+        update = _CloudUpdate(SynchronousUpdateTicket(), target.uuid, kind, result, start_training)
+        self._cloud_update = update
         self._target_point_cloud_uuid = target.uuid
         # Even an unobserved publication must be rolled back on job failure.
         if kind != "restore":
             self._preview_override_active = True
+        try:
+            update.ticket = self._set_point_cloud_data(point_cloud, points, colors)
+        except Exception:
+            self._cloud_update = previous
+            raise
         lf.log.debug(f"Queued {kind} cloud update for '{target.name}'")
 
     def _cancel_cloud_update(self):
