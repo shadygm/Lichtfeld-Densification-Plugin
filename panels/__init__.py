@@ -7,7 +7,7 @@ import importlib
 
 def __getattr__(name):
     if name == "DensePipelineConfig":
-        from ..core.config import DensePipelineConfig
+        from ..core.pipeline.config import DensePipelineConfig
 
         return DensePipelineConfig
     if name in {"DensificationPanel", "DensifyResult", "DensifyJob", "DensifyStage"}:

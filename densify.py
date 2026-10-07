@@ -20,12 +20,23 @@ _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from .core.camera_models import CameraRecord
-from .core.config import DensePipelineConfig
-from .core.geometry import K_from_camera, P_from_KRt, cam_center_world, pose_world2cam
-from .core.image_utils import find_image, image_dir, to_uint8_rgb
-from .core.selection import nearest_neighbors, select_cameras_by_visibility, select_cameras_kcenters
-from .core.writers import write_ply, write_points3D_bin, write_sparse_model_bin
+from .core.cameras.models import CameraRecord
+from .core.pipeline.config import DensePipelineConfig
+from .core.reconstruction.cloud import DenseCloud
+from .core.reconstruction.tracks import ObservationTracks, observation_tracks
+from .core.cameras.geometry import K_from_camera, P_from_KRt, cam_center_world, pose_world2cam
+from .core.images.io import find_image, image_dir, to_uint8_rgb
+from .core.cameras.selection import (
+    nearest_neighbors,
+    select_cameras_by_visibility,
+    select_cameras_kcenters,
+)
+from .core.reconstruction.writers import (
+    write_ply,
+    write_ply_vertices,
+    write_points3D_bin,
+    write_sparse_model_bin,
+)
 
 if TYPE_CHECKING:
     import pycolmap
@@ -59,11 +70,12 @@ def _voxel_select_track_preserving(
     xyz: np.ndarray,
     rgb: np.ndarray,
     err: np.ndarray,
-    tracks: Sequence[Sequence[Tuple[int, float, float]]],
+    tracks: ObservationTracks,
     voxel_size: float,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[List[Tuple[int, float, float]]]]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, ObservationTracks]:
+    tracks = observation_tracks(tracks)
     if voxel_size <= 0.0 or xyz.shape[0] == 0:
-        return xyz, rgb, err, [list(t) for t in tracks]
+        return xyz, rgb, err, tracks
 
     voxels = np.floor(xyz / float(voxel_size)).astype(np.int64)
     chosen: Dict[Tuple[int, int, int], int] = {}
@@ -73,13 +85,13 @@ def _voxel_select_track_preserving(
         if prev is None:
             chosen[key] = idx
             continue
-        track_len = len(tracks[idx])
-        prev_track_len = len(tracks[prev])
+        track_len = tracks.lengths[idx]
+        prev_track_len = tracks.lengths[prev]
         if track_len > prev_track_len or (track_len == prev_track_len and float(err[idx]) < float(err[prev])):
             chosen[key] = idx
 
     sel = np.asarray(sorted(chosen.values()), dtype=np.int64)
-    return xyz[sel], rgb[sel], err[sel], [list(tracks[i]) for i in sel]
+    return xyz[sel], rgb[sel], err[sel], tracks.select(sel)
 
 
 
@@ -148,42 +160,46 @@ def _apply_point_cap(
     xyz: np.ndarray,
     rgb: np.ndarray,
     err: np.ndarray,
-    tracks: Optional[Sequence[Sequence[Tuple[int, float, float]]]],
+    tracks: Optional[ObservationTracks],
     max_points: int,
     seed: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[List[List[Tuple[int, float, float]]]]]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[ObservationTracks]]:
     if max_points > 0 and xyz.shape[0] > max_points:
         sel = np.random.default_rng(seed).choice(xyz.shape[0], size=max_points, replace=False)
-        capped_tracks = None if tracks is None else [list(tracks[i]) for i in sel]
+        capped_tracks = None if tracks is None else observation_tracks(tracks).select(sel)
         return xyz[sel], rgb[sel], err[sel], capped_tracks
-    return xyz, rgb, err, None if tracks is None else [list(t) for t in tracks]
+    return xyz, rgb, err, tracks
 
 
 def _apply_track_filter(
     xyz: np.ndarray,
     rgb: np.ndarray,
     err: np.ndarray,
-    tracks: Sequence[Sequence[Tuple[int, float, float]]],
+    tracks: ObservationTracks,
     min_track_length: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[List[Tuple[int, float, float]]]]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, ObservationTracks]:
+    """Select aligned numeric tracks without creating observation rows."""
+    tracks = observation_tracks(tracks)
     min_track = max(0, int(min_track_length))
     if min_track <= 0:
-        return xyz, rgb, err, [list(t) for t in tracks]
-    keep = np.asarray([len(track) >= min_track for track in tracks], dtype=bool)
-    return xyz[keep], rgb[keep], err[keep], [list(track) for track, ok in zip(tracks, keep) if ok]
+        return xyz, rgb, err, tracks
+    keep = tracks.lengths >= min_track
+    if keep.all():
+        return xyz, rgb, err, tracks
+    return xyz[keep], rgb[keep], err[keep], tracks.select(keep)
 
 
 def _log_track_filter_stats(
     label: str,
-    tracks_before: Sequence[Sequence[Tuple[int, float, float]]],
-    tracks_after: Sequence[Sequence[Tuple[int, float, float]]],
+    tracks_before: ObservationTracks,
+    tracks_after: ObservationTracks,
     min_track_length: int,
 ) -> None:
     before = len(tracks_before)
     after = len(tracks_after)
     kept_pct = 100.0 if before == 0 else (float(after) / float(before)) * 100.0
-    before_lengths = np.asarray([len(track) for track in tracks_before], dtype=np.int32)
-    after_lengths = np.asarray([len(track) for track in tracks_after], dtype=np.int32)
+    before_lengths = observation_tracks(tracks_before).lengths
+    after_lengths = observation_tracks(tracks_after).lengths
 
     def fmt(lengths: np.ndarray) -> str:
         if lengths.size == 0:
@@ -392,32 +408,6 @@ def _load_existing_chunk(path_in: str, expected_metadata: Dict[str, Any]) -> Opt
         return None
 
 
-def _write_ply_vertices(file_obj, xyz: np.ndarray, rgb_uint8: np.ndarray) -> None:
-    if xyz.shape[0] == 0:
-        return
-    if rgb_uint8.dtype != np.uint8:
-        rgb_uint8 = to_uint8_rgb(rgb_uint8)
-    packed = np.empty(
-        xyz.shape[0],
-        dtype=[
-            ("x", "<f4"),
-            ("y", "<f4"),
-            ("z", "<f4"),
-            ("red", "u1"),
-            ("green", "u1"),
-            ("blue", "u1"),
-        ],
-    )
-    xyz32 = xyz.astype(np.float32, copy=False)
-    packed["x"] = xyz32[:, 0]
-    packed["y"] = xyz32[:, 1]
-    packed["z"] = xyz32[:, 2]
-    packed["red"] = rgb_uint8[:, 0]
-    packed["green"] = rgb_uint8[:, 1]
-    packed["blue"] = rgb_uint8[:, 2]
-    packed.tofile(file_obj)
-
-
 def _write_ply_from_npz_chunks(
     output_path: str,
     chunk_paths: Sequence[str],
@@ -472,7 +462,7 @@ end_header
                 if local_idx is not None:
                     xyz = xyz[local_idx]
                     rgb = rgb[local_idx]
-                _write_ply_vertices(f, xyz, rgb)
+                write_ply_vertices(f, xyz, to_uint8_rgb(rgb) if rgb.dtype != np.uint8 else rgb)
             global_offset += count
 
     return output_count, total
@@ -576,7 +566,7 @@ def _run_dense_pipeline_chunked(
                 "Completed chunks remain available for --resume_chunks."
             ) from exc
 
-        tracks_before = [list(track) for track in result.tracks]
+        tracks_before = result.tracks
         xyz, rgb, err, tracks = _apply_track_filter(
             result.xyz,
             result.rgb,
@@ -722,7 +712,7 @@ def dense_init(
 
     tracks = getattr(result, "tracks", None)
     if tracks is not None:
-        tracks_before = [list(track) for track in tracks]
+        tracks_before = tracks
         xyz, rgb, err, tracks = _apply_track_filter(
             result.xyz,
             result.rgb,
@@ -785,7 +775,9 @@ def dense_init_from_lfs(
     on_sequential_viz: Optional[Callable[[str], None]] = None,
     debug_state=None,
     cancel_requested: Optional[Callable[[], bool]] = None,
-) -> Tuple[int, Optional[str]]:
+    write_colmap: bool = False,
+    on_cloud_preview: Optional[Callable[[DenseCloud], None]] = None,
+) -> Tuple[int, str | DenseCloud]:
     np.random.seed(config.seed)
     if progress_callback:
         progress_callback(2.0, "Extracting camera data from scene...")
@@ -822,6 +814,8 @@ def dense_init_from_lfs(
             config,
             progress_callback=progress_callback,
             on_sequential_viz=on_sequential_viz,
+            on_cloud_preview=on_cloud_preview,
+            retain_observations=write_colmap,
             debug_state=debug_state,
             cancel_requested=cancel_requested,
         )
@@ -832,7 +826,9 @@ def dense_init_from_lfs(
     if _cancel_requested(cancel_requested):
         return 2, "Cancelled"
 
-    tracks_before = [list(track) for track in result.tracks]
+    if progress_callback:
+        progress_callback(91.0, "Filtering dense tracks...")
+    tracks_before = result.tracks
     xyz, rgb, err, tracks = _apply_track_filter(
         result.xyz,
         result.rgb,
@@ -840,7 +836,7 @@ def dense_init_from_lfs(
         result.tracks,
         config.min_track_length,
     )
-    _log_track_filter_stats("COLMAP track filter", tracks_before, tracks, config.min_track_length)
+    _log_track_filter_stats("Dense track filter", tracks_before, tracks, config.min_track_length)
     if xyz.shape[0] == 0:
         return 1, "No points remain after track-length filtering."
 
@@ -853,13 +849,20 @@ def dense_init_from_lfs(
         xyz, rgb, err, tracks = _voxel_select_track_preserving(xyz, rgb, err, tracks, config.voxel_size)
         lf.log.info(f"Distance filter ({config.voxel_size:.4f}): {xyz.shape[0]:,} points remaining")
 
-    if progress_callback:
-        progress_callback(95.0, "Writing COLMAP sparse output...")
-    write_sparse_model_bin(config.output_path, records, xyz, to_uint8_rgb(rgb), err, tracks)
-    lf.log.info(f"Dense sparse model saved to {config.output_path} ({xyz.shape[0]:,} points)")
+    if _cancel_requested(cancel_requested):
+        return 2, "Cancelled"
+    cloud = DenseCloud(xyz.astype(np.float32, copy=False), to_uint8_rgb(rgb))
+    if write_colmap:
+        if progress_callback:
+            progress_callback(95.0, "Writing COLMAP sparse output...")
+        write_sparse_model_bin(config.output_path, records, xyz, cloud.colors, err, tracks)
+        cloud.output_path = config.output_path
+        lf.log.info(f"Dense sparse model saved to {config.output_path} ({xyz.shape[0]:,} points)")
+    elif progress_callback:
+        progress_callback(95.0, "Preparing point cloud for scene...")
     if progress_callback:
         progress_callback(100.0, f"Done! {xyz.shape[0]:,} points")
-    return 0, config.output_path
+    return 0, cloud
 
 
 def build_argparser():

@@ -7,7 +7,7 @@ from typing import Optional
 
 import lichtfeld as lf
 
-from ..core.debug_viz import MatchDebugState, MatchPreview
+from ..core.previews.matches import MatchDebugState, MatchPreview
 
 
 class DebugMatchesPanel(lf.ui.Panel):
