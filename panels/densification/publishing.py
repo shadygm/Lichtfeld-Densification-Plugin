@@ -36,16 +36,27 @@ def supports_async_publication(point_cloud) -> bool:
     return callable(getattr(point_cloud, "set_data_async", None))
 
 
-def set_point_cloud_data(point_cloud, points, colors) -> CloudUpdateTicket:
+def select_point_cloud_publisher(point_cloud):
+    return _publish_async if supports_async_publication(point_cloud) else _publish_sync
+
+
+def _prepare_inputs(points, colors):
     if not isinstance(points, lf.Tensor):
         points = np.ascontiguousarray(points, dtype=np.float32)
     if not isinstance(colors, lf.Tensor):
         colors = np.asarray(colors)
         colors = np.ascontiguousarray(colors, dtype=np.uint8 if colors.dtype == np.uint8 else np.float32)
-    if supports_async_publication(point_cloud):
-        # Native async publication retains these immutable input owners.
-        return point_cloud.set_data_async(points, colors, queue_policy="latest")
+    return points, colors
 
+
+def _publish_async(point_cloud, points, colors) -> CloudUpdateTicket:
+    points, colors = _prepare_inputs(points, colors)
+    # Native async publication retains these immutable input owners.
+    return point_cloud.set_data_async(points, colors, queue_policy="latest")
+
+
+def _publish_sync(point_cloud, points, colors) -> CloudUpdateTicket:
+    points, colors = _prepare_inputs(points, colors)
     if not isinstance(points, lf.Tensor):
         points = lf.Tensor.from_numpy(points)
     if not isinstance(colors, lf.Tensor):

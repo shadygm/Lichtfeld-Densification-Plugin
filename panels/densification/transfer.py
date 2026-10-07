@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import lichtfeld as lf
 from .job import DensifyResult, DensifyStage
-from .publishing import CloudUpdateTicket, SynchronousUpdateTicket, set_point_cloud_data
+from .publishing import CloudUpdateTicket, SynchronousUpdateTicket, select_point_cloud_publisher
 
 
 @dataclass
@@ -27,9 +27,11 @@ class DensificationTransfer:
         self._active_run_roi_only_selected = None
         self._preview_override_active = False
 
-    @staticmethod
-    def _set_point_cloud_data(point_cloud, points, colors):
-        return set_point_cloud_data(point_cloud, points, colors)
+    def _set_point_cloud_data(self, point_cloud, points, colors):
+        # Select once on first publication. Keep no bound native cloud wrapper:
+        # later publications can replace the payload or target another scene.
+        self._set_point_cloud_data = select_point_cloud_publisher(point_cloud)
+        return self._set_point_cloud_data(point_cloud, points, colors)
 
     def _queue_cloud_update(self, target, point_cloud, points, colors, *, kind,
                             result=None, start_training=False):

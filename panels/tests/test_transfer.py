@@ -47,11 +47,14 @@ class TransferTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.modules_patch.stop()
 
+    def setUp(self):
+        self.panel = self.Panel.__new__(self.Panel)
+
     def test_native_tensors_are_passed_to_setter_without_cloning(self):
         points = Tensor(np.ones((2, 3), dtype=np.float32))
         colors = Tensor(np.ones((2, 3), dtype=np.uint8))
         cloud = Mock()
-        ticket = self.Panel._set_point_cloud_data(cloud, points, colors)
+        ticket = self.panel._set_point_cloud_data(cloud, points, colors)
         cloud.set_data_async.assert_called_once_with(points, colors, queue_policy='latest')
         self.assertIs(ticket, cloud.set_data_async.return_value)
         cloud.set_data.assert_not_called()
@@ -62,7 +65,7 @@ class TransferTests(unittest.TestCase):
         points = np.arange(18, dtype=np.float32).reshape(3, 6)[:, ::2]
         colors = np.arange(9, dtype=np.uint8).reshape(3, 3)
         cloud = Mock()
-        self.Panel._set_point_cloud_data(cloud, points, colors)
+        self.panel._set_point_cloud_data(cloud, points, colors)
         actual_points, actual_colors = cloud.set_data_async.call_args.args
         np.testing.assert_array_equal(actual_points, points)
         np.testing.assert_array_equal(actual_colors, colors)
@@ -76,7 +79,7 @@ class TransferTests(unittest.TestCase):
         points = np.ones((2, 3), dtype=np.float64)
         colors = np.full((2, 3), .5, dtype=np.float64)
         cloud = Mock()
-        self.Panel._set_point_cloud_data(cloud, points, colors)
+        self.panel._set_point_cloud_data(cloud, points, colors)
         actual_points, actual_colors = cloud.set_data_async.call_args.args
         self.assertEqual(actual_points.dtype, np.float32)
         self.assertEqual(actual_colors.dtype, np.float32)

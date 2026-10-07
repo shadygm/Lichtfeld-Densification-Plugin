@@ -1,4 +1,5 @@
 """Legacy publication shares completion, rollback and ROI lifecycle semantics."""
+import importlib
 from threading import current_thread, main_thread
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -32,6 +33,26 @@ class LegacyTransferTests(AsyncPanelTestCase):
         self.addCleanup(version.stop)
         self.scene.node.payload = LegacyCloud(self.scene.node)
 
+    def test_publisher_selected_once_and_uses_current_cloud_wrapper(self):
+        publishing = importlib.import_module(f'{self.module.__name__}.publishing')
+        points, colors = np.ones((2, 3), np.float32), np.ones((2, 3), np.uint8)
+        for version, async_supported in (('v0.5.4', False), ('v0.5.5', True)):
+            with self.subTest(version=version):
+                self.host.__version__ = version
+                panel = self.Panel.__new__(self.Panel)
+                with patch.object(publishing, 'supports_async_publication',
+                                  wraps=publishing.supports_async_publication) as check:
+                    for _ in range(3):
+                        cloud = Mock()
+                        panel._set_point_cloud_data(cloud, points, colors)
+                        if async_supported:
+                            cloud.set_data_async.assert_called_once_with(points, colors, queue_policy='latest')
+                            cloud.set_data.assert_not_called()
+                        else:
+                            cloud.set_data.assert_called_once()
+                            cloud.set_data_async.assert_not_called()
+                    check.assert_called_once()
+
     def test_version_boundary_and_api_availability(self):
         points = np.ones((2, 3), np.float32)
         colors = np.full((2, 3), 128, np.uint8)
@@ -47,7 +68,8 @@ class LegacyTransferTests(AsyncPanelTestCase):
                 if not async_available:
                     cloud.set_data_async = None
                 self.host.__version__ = version
-                ticket = self.Panel._set_point_cloud_data(cloud, points, colors)
+                panel = self.Panel.__new__(self.Panel)
+                ticket = panel._set_point_cloud_data(cloud, points, colors)
                 if expected_async:
                     cloud.set_data_async.assert_called_once_with(points, colors, queue_policy='latest')
                     cloud.set_data.assert_not_called()
@@ -65,7 +87,8 @@ class LegacyTransferTests(AsyncPanelTestCase):
         self.host.__version__ = 'unknown'
         with patch.object(self.host, 'build_info', SimpleNamespace(version='v0.5.4'), create=True):
             cloud = Mock()
-            self.Panel._set_point_cloud_data(cloud, points, colors)
+            panel = self.Panel.__new__(self.Panel)
+            panel._set_point_cloud_data(cloud, points, colors)
             cloud.set_data_async.assert_not_called()
             cloud.set_data.assert_called_once()
 
@@ -154,5 +177,5 @@ class LegacyTransferTests(AsyncPanelTestCase):
         colors = Tensor(np.ones((2, 3), np.float32))
         cloud = Mock()
         with patch.object(Tensor, 'from_numpy', side_effect=AssertionError('extra import')):
-            self.Panel._set_point_cloud_data(cloud, points, colors)
+            self.panel._set_point_cloud_data(cloud, points, colors)
         cloud.set_data.assert_called_once_with(points, colors)
