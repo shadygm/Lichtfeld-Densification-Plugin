@@ -27,6 +27,11 @@ class Tensor:
     def numpy(self, copy=True):
         return self.array.copy() if copy else self.array
 
+    @staticmethod
+    def from_numpy(array, copy=True):
+        assert copy and array.flags.c_contiguous
+        return Tensor(array.copy())
+
 
 class Ticket:
     def __init__(self, node, points, colors):
