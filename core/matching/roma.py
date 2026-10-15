@@ -85,6 +85,40 @@ class _CachedFeatures(torch.nn.Module):
         return features
 
 
+def _fit_caches_to_free_memory(
+    device: torch.device,
+    lr_pixels: int,
+    hr_pixels: int,
+    descriptor_layers: int,
+    upper: Tuple[int, int, int],
+) -> Tuple[int, int, int]:
+    """Shrink (image, descriptor, refiner) cache capacities to fit free GPU memory.
+
+    The fixed limits assume a large GPU: on an 8 GB card the refiner cache
+    alone (24 x ~56 MiB at 512px) plus the descriptor cache exhausts memory.
+    """
+    free_bytes, _ = torch.cuda.mem_get_info(device)
+    max_pixels = max(lr_pixels, hr_pixels)
+    # Transient memory for one match (local correlation alone takes ~588 MiB at 512px).
+    reserve = int(1.5 * 2**30 * max_pixels / 512**2)
+    budget = max(0, int((free_bytes - reserve) * 0.6))
+    image_bytes = (lr_pixels + hr_pixels) * 3 * 4
+    # DINOv3 ViT-L/16: 1024-dim fp32 tokens per 16x16 patch, per retained layer.
+    f_bytes = (lr_pixels // 256) * 1024 * 4 * descriptor_layers
+    # VGG19-BN (patch 4) half-precision maps: 64ch full-res + 128ch half-res + 256ch quarter-res.
+    refiner_bytes = max_pixels * 112 * 2
+    shares = (0.15, 0.35, 0.5)
+    fitted = tuple(
+        max(2, min(cap, int(budget * share) // per_entry))
+        for cap, share, per_entry in zip(upper, shares, (image_bytes, f_bytes, refiner_bytes))
+    )
+    logger.info(
+        f"RoMaV2 cache capacities (image, descriptor, refiner) = {fitted} "
+        f"for {free_bytes / 2**30:.1f} GiB free GPU memory (defaults {upper})"
+    )
+    return fitted
+
+
 class RomaMatcher:
     """Wrapper around RoMaV2 for dense matching."""
 
@@ -112,11 +146,20 @@ class RomaMatcher:
         lr_pixels = self.model.H_lr * self.model.W_lr
         hr_pixels = (self.model.H_hr or 0) * (self.model.W_hr or 0)
         # Scale entry limits with resolution so high-detail modes retain less.
-        self._image_capacity = max(2, 256 * 512**2 // (lr_pixels + hr_pixels))
-        self.model.f = _CachedFeatures(self.model.f, max(2, 256 * 512**2 // lr_pixels))
-        self.model.refiner_features = _CachedFeatures(
-            self.model.refiner_features, max(2, 24 * 512**2 // max(lr_pixels, hr_pixels))
-        )
+        image_capacity = max(2, 256 * 512**2 // (lr_pixels + hr_pixels))
+        f_capacity = max(2, 256 * 512**2 // lr_pixels)
+        refiner_capacity = max(2, 24 * 512**2 // max(lr_pixels, hr_pixels))
+        if self.device.type == "cuda":
+            image_capacity, f_capacity, refiner_capacity = _fit_caches_to_free_memory(
+                self.device,
+                lr_pixels,
+                hr_pixels,
+                len(descriptor_config.layer_idx),
+                (image_capacity, f_capacity, refiner_capacity),
+            )
+        self._image_capacity = image_capacity
+        self.model.f = _CachedFeatures(self.model.f, f_capacity)
+        self.model.refiner_features = _CachedFeatures(self.model.refiner_features, refiner_capacity)
         self._image_cache = OrderedDict()
         self.sample_thresh = 0.9
         self.w_resized = self.model.W_lr
