@@ -7,7 +7,13 @@ from dataclasses import dataclass
 
 import lichtfeld as lf
 from .job import DensifyResult, DensifyStage
-from .publishing import CloudUpdateTicket, SynchronousUpdateTicket, select_point_cloud_publisher
+from .publishing import (
+    CloudUpdateTicket,
+    SynchronousUpdateTicket,
+    _publish_async,
+    _publish_sync,
+    select_point_cloud_publisher,
+)
 
 
 @dataclass
@@ -17,6 +23,7 @@ class _CloudUpdate:
     kind: str
     result: DensifyResult | None = None
     start_training: bool = False
+    retry_inputs: tuple[object, object] | None = None
 
 
 class DensificationTransfer:
@@ -44,10 +51,31 @@ class DensificationTransfer:
             self._preview_override_active = True
         try:
             update.ticket = self._set_point_cloud_data(point_cloud, points, colors)
-        except Exception:
-            self._cloud_update = previous
-            raise
+        except Exception as exc:
+            if (self._set_point_cloud_data is not _publish_async
+                    or not self._retry_cloud_update_synchronously(update, point_cloud, points, colors, exc)):
+                self._cloud_update = previous
+                raise
+            if previous is not None:
+                previous.ticket.cancel()
+        if not isinstance(update.ticket, SynchronousUpdateTicket):
+            update.retry_inputs = (points, colors)
         lf.log.debug(f"Queued {kind} cloud update for '{target.name}'")
+
+    @staticmethod
+    def _retry_cloud_update_synchronously(update, point_cloud, points, colors, async_error):
+        lf.log.warn(f"Async point cloud {update.kind} update failed: {async_error}. Retrying synchronously.")
+        ticket = update.ticket
+        # Scene callbacks must see an in-flight update until set_data returns.
+        update.ticket = SynchronousUpdateTicket()
+        try:
+            update.ticket = _publish_sync(point_cloud, points, colors)
+        except Exception as exc:
+            update.ticket = ticket
+            lf.log.warn(f"Synchronous point cloud {update.kind} retry failed: {exc}")
+            return False
+        update.retry_inputs = None
+        return True
 
     def _cancel_cloud_update(self):
         if self._cloud_update is not None:
@@ -92,6 +120,14 @@ class DensificationTransfer:
             return False
         state = update.ticket.state
         error = None
+        if state == "failed" and update.retry_inputs is not None:
+            scene = lf.get_scene()
+            node = scene.get_node_by_uuid(update.node_uuid) if scene is not None else None
+            cloud = node.point_cloud() if node is not None else None
+            if cloud is not None and self._retry_cloud_update_synchronously(
+                update, cloud, *update.retry_inputs, update.ticket.error or "Cloud upload failed",
+            ):
+                state = update.ticket.state
         if state == "published":
             # Publication replaces the payload: do not reuse an old PointCloud wrapper.
             scene = lf.get_scene()

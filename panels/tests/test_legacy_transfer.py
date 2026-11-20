@@ -155,6 +155,48 @@ class LegacyTransferTests(AsyncPanelTestCase):
         self.assertFalse(self.panel._is_running())
         self.host.start_training.assert_not_called()
 
+    def test_async_submission_failure_uses_sync_and_cancels_pending_preview(self):
+        self.host.__version__ = 'v0.5.5'
+        preview_cloud = SimpleNamespace(set_data_async=Mock())
+        pending = preview_cloud.set_data_async.return_value
+        pending.state = 'queued'
+        self.panel._queue_cloud_update(
+            self.scene.node, preview_cloud,
+            np.zeros((2, 3), np.float32), np.zeros((2, 3), np.uint8), kind='preview',
+        )
+        cloud = self.scene.node.point_cloud()
+        cloud.set_data_async = Mock(side_effect=NotImplementedError('async unavailable'))
+
+        result, ticket = self.submit_final(train=True)
+        self.assertEqual(ticket.state, 'published')
+        cloud.set_data_async.assert_called_once()
+        cloud.published.assert_called_once()
+        pending.cancel.assert_called_once()
+        self.host.start_training.assert_not_called()
+        self.panel.on_update(None)
+        self.assertIs(self.panel.last_result, result)
+        self.host.start_training.assert_called_once()
+
+    def test_failed_async_ticket_retries_with_current_cloud_wrapper(self):
+        self.host.__version__ = 'v0.5.5'
+        cloud = self.scene.node.point_cloud()
+        cloud.set_data_async = Mock()
+        ticket = cloud.set_data_async.return_value
+        ticket.state = 'queued'
+        result, _ = self.submit_final(train=True)
+        replacement = LegacyCloud(self.scene.node)
+        self.scene.node.payload = replacement
+        ticket.state, ticket.error = 'failed', 'upload failed'
+
+        self.panel.on_update(None)
+        cloud.published.assert_not_called()
+        replacement.published.assert_called_once()
+        actual_points, actual_colors = replacement.published.call_args.args
+        np.testing.assert_array_equal(actual_points.array, np.ones((3, 3)))
+        np.testing.assert_array_equal(actual_colors.array, np.full((3, 3), 128, np.uint8))
+        self.assertIs(self.panel.last_result, result)
+        self.host.start_training.assert_called_once()
+
     def test_roi_and_empty_arrays_publish_synchronously(self):
         self.panel.config.roi_only_selected = True
         result, _ = self.submit_final()
